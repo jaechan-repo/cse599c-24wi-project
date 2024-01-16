@@ -5,6 +5,7 @@ Root folder contains:
 - `aligner`: to be treated as a single module (imported or called by scripts _outside_ this folder). Contains all the key implementations
 - `train`: training scripts
 - `eval`: evaluation scripts
+- `data`: Upload data here. Do not explicitly upload data if the data is large (use `.gitignore`); write an easy-to-run data downloader script that everybody can use.
 
 ## Coding Conventions
 - Readable code. The use of `typing` (type hinting) and detailed comments is encouraged.
