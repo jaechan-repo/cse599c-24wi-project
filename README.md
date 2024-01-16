@@ -4,7 +4,7 @@ Project repository for CSE 599c taught in the 2024 winter.
 Root folder contains:
 - `aligner`: to be treated as a single module (imported or called by scripts _outside_ this folder). Contains all the key implementations
 - `train`: training scripts
-- `eval`: evaluation scripts
+- `eval`: evaluation benchmarking scripts
 - `data`: Upload data here. Do not explicitly upload data if the data is large (use `.gitignore`); write an easy-to-run data downloader script that everybody can use.
 
 ## Coding Conventions
