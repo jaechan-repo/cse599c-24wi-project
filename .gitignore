@@ -1,3 +1,5 @@
 venv
 *.ipynb
-useful_commands.md
+data/*
+
+!data/*.py
