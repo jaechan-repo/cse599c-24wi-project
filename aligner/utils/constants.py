@@ -1,14 +1,17 @@
 # Time - Audio
 SAMPLE_RATE = 32000
-HOP_WIDTH = 320     # 10 ms hop duration
-FFT_SIZE = 2048
-NUM_FRAMES = 1024
+HOP_LENGTH = 320     # 10 ms hop duration
+AUDIO_RESOLUTION = HOP_LENGTH / SAMPLE_RATE # 10 ms
+N_FFT = 2 * HOP_LENGTH
+
+N_FRAMES_PER_CLIP = 1024
+N_FRAMES_PER_STRIDE = N_FRAMES_PER_CLIP // 2
 
 # Time - MIDI
-EVENT_RESOLUTION = 0.020    # 20 ms
+EVENT_RESOLUTION = AUDIO_RESOLUTION         # 10 ms
 
 # Frequency
-NUM_MEL_BINS = 512
+N_MELS = 512
 MEL_LO_HZ = 20.0
 MEL_FMIN = 20.0
 MEL_FMAX = 7600.0
@@ -16,5 +19,5 @@ MEL_FMAX = 7600.0
 # Token id
 TOKEN_ID = {
     '[event]': 129, # event marker
-    '[null]': 128,  # onset of silence
+    '[BOS]': 128,   # beginning of score/sequence
 }
