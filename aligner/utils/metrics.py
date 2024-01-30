@@ -1,5 +1,3 @@
-### Implement alignment distance and alignment accuracy metrics
-
 import torch
 
 
