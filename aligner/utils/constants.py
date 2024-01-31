@@ -19,6 +19,7 @@ MEL_FMAX = 7600.0
 
 # Token id
 TOKEN_ID = {
+    '[BOS]': 128,   # beginning of score
     '[event]': 129, # event marker
-    '[BOS]': 128,   # beginning of score/sequence
+    '[PAD]': 130,   # end of score / padding
 }
