@@ -54,7 +54,23 @@ def evaluate(
 
     # Compute loss and metrics for each batch with tqdm
     for batch in tqdm(dataloader):
-        # batch of shape (N, E, X), where N is the batch size, E is the number of MIDI events in the score, and X is the number of audio frames
+        '''
+        Each sample is a dictionary with the following fields:
+            (0) "wav_uri": absolute path to audio file
+            (1) "midi_uri": absolute path to midi file
+            (2) "audio_clip": ~10 sec spectrogram. Size: (n_mels, n_frames).
+            (3) "Y": alignment matrix. Size: (n_frames, n_events).
+            (4) "input_ids": Integer array representation (tokenization) of the MIDI.
+                This is the encoding that the transformer model receives. During
+                tokenization, MIDI-scaled pitches [0, 121] are directly taken as unique 
+                tokens, and special tokens such as [BOS] and [event] are attached. See
+                `TOKEN_ID` in `constants.py` for their integer codes. Size: (n_tokens,).
+            (5) "event_mask": Array filled with 0s and 1s, where 1s fill positions where
+                event markers lie in "input_ids". Size: (n_tokens,).
+            (6) "attn_mask": mask for self-attention. Size: (n_tokens, n_tokens).'''
+        
+        # Assuming batch of shape (N, E, X), where N is the batch size, E is the number of MIDI events in the score, and X is the number of audio frames
+        # TODO: Update with actual batch format
         audio_frames, score_events, Y, midi_event_timestamps = batch
 
         # get model predictions given audio frames and score events
@@ -62,21 +78,15 @@ def evaluate(
         Y_pred = model(audio_frames, score_events)
 
         # loss should use the non-decoded alignment matrix???
-        loss = compute_loss(Y_pred, Y, midi_event_timestamps)
+        total_loss += compute_loss(Y_pred, Y, midi_event_timestamps, 'mean')
 
         # decode soft cross-attn alignment matrix into binary alignment matrix
         Y_pred_binary = decoding(Y_pred)
 
-        distance = temporal_distance_vec(Y_pred_binary, Y, midi_event_timestamps, tolerance)
-        accuracy = binary_accuracy_vec(Y_pred_binary, Y, midi_event_timestamps, tolerance)
-        monotonic = monotonicity_vec(Y_pred_binary, midi_event_timestamps)
-        coverage = score_coverage_vec(Y_pred_binary)
-
-        total_loss += torch.mean(loss)
-        total_distance += torch.mean(distance)
-        total_accuracy += torch.mean(accuracy)
-        total_monotonicity += torch.mean(monotonic)
-        total_coverage += torch.mean(coverage)
+        total_distance += temporal_distance_vec(Y_pred_binary, Y, midi_event_timestamps, tolerance, 'mean')
+        total_accuracy += binary_accuracy_vec(Y_pred_binary, Y, midi_event_timestamps, tolerance, 'mean')
+        total_monotonicity += monotonicity_vec(Y_pred_binary, midi_event_timestamps, 'mean')
+        total_coverage += score_coverage_vec(Y_pred_binary, 'mean')
 
     return total_loss / len(dataloader), total_distance / len(dataloader), total_accuracy / len(dataloader), total_monotonicity / len(dataloader), total_coverage / len(dataloader)
         
