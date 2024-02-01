@@ -4,8 +4,9 @@ import torch
 def compute_loss(
         Y_pred: torch.Tensor, 
         Y: torch.Tensor, 
-        midi_event_timestamps: torch.Tensor
-    ) -> torch.Tensor:
+        midi_event_timestamps: torch.Tensor,
+        reduction: str = 'none'
+    ) -> float:
 
     """Compute the loss between the predicted cross-attention probability alignment matrix and the ground-truth matrices.
     Loss is composed of cross-entropy loss and temporal monotonicity constraint.
@@ -14,9 +15,10 @@ def compute_loss(
         Y_pred (torch.Tensor): Predicted binary alignment matrix of shape (N, E, X), where E is the number of MIDI events in the score and X is the number of audio frames.
         Y (torch.Tensor): Ground truth binary alignment matrix of shape (E, X).
         midi_event_timestamps (torch.Tensor): Timestamps of MIDI events of shape (E,).
+        reduction (str): Reduction method for the loss. Either \textbf{mean} or \textbf{none}.
 
     Returns:
-        float: Average loss between Y_pred and Y.
+        float or torch.Tensor: Loss between Y_pred and Y across the batch.
     """
 
     # Cross-entropy loss
@@ -24,7 +26,10 @@ def compute_loss(
 
     # TODO: Monotonicity constraint @Jaechan.
 
-    return torch.mean(loss)
+    if reduction == 'mean':
+        return loss.mean()
+    elif reduction == 'none':
+        return loss
 
 
 def temporal_distance(
@@ -32,7 +37,7 @@ def temporal_distance(
         Y: torch.Tensor, 
         midi_event_timestamps: torch.Tensor, 
         tolerance: float = 0.
-    ) -> torch.Tensor:
+    ) -> float:
     """Compute the audio-frame-wise temporal alignment distance between the predicted and ground-truth binary alignment matrices.
 
     Args:
@@ -61,8 +66,9 @@ def temporal_distance_vec(
         Y_pred: torch.Tensor, 
         Y: torch.Tensor,
         midi_event_timestamps: torch.Tensor, 
-        tolerance: float
-    ) -> torch.Tensor:
+        tolerance: float,
+        reduction: str = 'none'
+    ) -> float:
     """Compute the audio-frame-wise temporal alignment distance between the predicted and ground-truth binary alignment matrices.
 
     Args:
@@ -70,9 +76,10 @@ def temporal_distance_vec(
         Y (torch.Tensor): Ground truth binary alignment matrices of shape (N, E, X).
         midi_event_timestamps (torch.Tensor): Timestamps of MIDI events of shape (E,).
         tolerance (float): Tolerance threshold for alignment distance.
+        reduction (str): Reduction method for the temporal distance. Either \textbf{mean} or \textbf{none}.
 
     Returns:
-        torch.Tensor: Average temporal alignment distance between Y_pred and Y per sample.
+        float or torch.Tensor: Average temporal alignment distance between Y_pred and Y across the batch.
     """
     pred_indices = torch.argmax(Y_pred, dim=1)
     true_indices = torch.argmax(Y, dim=1)
@@ -86,7 +93,12 @@ def temporal_distance_vec(
     L1_distances = torch.abs(pred_timestamps - true_timestamps) - tolerance
     threshold_distances = L1_distances * (L1_distances > 0).float()
     
-    return torch.mean(threshold_distances, dim=1)
+    avg_distance_per_sample = torch.mean(threshold_distances, dim=1)
+    
+    if reduction == 'mean':
+        return torch.mean(avg_distance_per_sample)
+    elif reduction == 'none':
+        return avg_distance_per_sample
 
 
 def binary_accuracy(
@@ -94,7 +106,7 @@ def binary_accuracy(
         Y: torch.Tensor, 
         midi_event_timestamps: torch.Tensor, 
         tolerance: float
-    ) -> torch.Tensor:
+    ) -> float:
     """Compute the audio-frame-wise binary alignment accuracy between the predicted and ground-truth binary alignment matrices.
 
     Args:
@@ -121,8 +133,9 @@ def binary_accuracy_vec(
         Y_pred: torch.Tensor, 
         Y: torch.Tensor, 
         midi_event_timestamps: torch.Tensor, 
-        tolerance: float
-    ) -> torch.Tensor:
+        tolerance: float,
+        reduction: str = 'none'
+    ) -> float:
     """Compute the audio-frame-wise binary alignment accuracy between the predicted and ground-truth binary alignment matrices.
 
     Args:
@@ -130,9 +143,10 @@ def binary_accuracy_vec(
         Y (torch.Tensor): Ground truth binary alignment matrix of shape (N, E, X).
         midi_event_timestamps (torch.Tensor): Timestamps of MIDI events of shape (E,).
         tolerance (float): Tolerance threshold for alignment distance.
+        reduction (str): Reduction method for the binary accuracy. Either \textbf{mean} or \textbf{none}.
 
     Returns:
-        torch.Tensor: Average binary accuray of alignment predictions per sample.
+        float or torch.Tensor: Average binary accuracy of alignment predictions across the batch.
     """
 
     pred_indices = torch.argmax(Y_pred, dim=1)
@@ -146,7 +160,12 @@ def binary_accuracy_vec(
 
     binary_accuracies = (torch.abs(pred_timestamps - true_timestamps) <= tolerance).float()
 
-    return torch.mean(binary_accuracies, dim=1)
+    mean_acc_per_sample = torch.mean(binary_accuracies, dim=1)
+
+    if reduction == 'mean':
+        return torch.mean(mean_acc_per_sample)
+    elif reduction == 'none':
+        return mean_acc_per_sample
 
 
 def monotonicity(
@@ -160,27 +179,28 @@ def monotonicity(
         midi_event_timestamps (torch.Tensor): Timestamps of MIDI events of shape (E,).
 
     Returns:
-        bool: Whether or not the predicted alignment adheres to monotonicity.
+        float: Whether or not the predicted alignment adheres to monotonicity.
     """
 
     pred_indices = torch.argmax(Y_pred, dim=0)
     pred_timestamps = midi_event_timestamps[pred_indices]
-    return torch.all(pred_timestamps[1:] >= pred_timestamps[:-1]).bool()
+    return torch.all(pred_timestamps[1:] >= pred_timestamps[:-1]).float()
 
 
 def monotonicity_vec(
         Y_pred: torch.Tensor, 
-        midi_event_timestamps: torch.Tensor
-    ) -> torch.Tensor:
+        midi_event_timestamps: torch.Tensor,
+        reduction: str = 'none'
+    ) -> float:
     """Compute the monotonicity of the predicted alignment matrices.
 
     Args:
         Y_pred (torch.Tensor): Predicted binary alignment matrix of shape (N, E, X), N is the batch size, E is the number of MIDI events in the score, and X is the number of audio frames.
         midi_event_timestamps (torch.Tensor): Timestamps of MIDI events of shape (E,).
+        reduction (str): Reduction method for the monotonicity. Either \textbf{mean} or \textbf{none}.
 
     Returns:
-        Tensor: Tensor of bool representing whether or not each predicted alignment matrix adheres to monotonicity.
-    """
+        float or torch.Tensor: Whether or not the predicted alignment adheres to monotonicity across the batch."""
     pred_indices = torch.argmax(Y_pred, dim=1)
 
     # Expand midi_event_timestamps to match the batch size
@@ -190,8 +210,12 @@ def monotonicity_vec(
 
     # Check if timestamps are monotonically non-decreasing along each frame
     diffs = pred_timestamps[:, 1:] - pred_timestamps[:, :-1]
-    monotonic = torch.all(diffs >= 0, dim=1).bool()
-    return monotonic
+    monotonicity_per_sample = torch.all(diffs >= 0, dim=1).float()
+
+    if reduction == 'mean':
+        return torch.mean(monotonicity_per_sample)
+    elif reduction == 'none':
+        return monotonicity_per_sample
 
 
 def score_coverage(Y_pred: torch.Tensor) -> float:
@@ -209,15 +233,21 @@ def score_coverage(Y_pred: torch.Tensor) -> float:
     return torch.mean(events_covered)
 
 
-def score_coverage_vec(Y_pred: torch.Tensor) -> torch.Tensor:
+def score_coverage_vec(Y_pred: torch.Tensor, reduction: str = 'none') -> float:
     """Compute the score-wise alignment coverage of the predicted alignment matrix.
 
     Args:
         Y_pred (torch.Tensor): Predicted binary alignment matrices of shape (N, E, X), where N is the batch size, E is the number of MIDI events in the score, and X is the number of audio frames.
+        reduction (str): Reduction method for the score coverage. Either \textbf{mean} or \textbf{none}.
 
-    Returns:
-        torch.Tensor: Tensor of floats indicating score-wise alignment coverage per sample.
-    """
+    Returns:   
+        float or torch.Tensor: Score-wise alignment coverage across the batch."""
         
     events_covered = (Y_pred.sum(dim=2) > 0).float()
-    return torch.mean(events_covered, dim=1)
+    percent_covered_per_sample = torch.mean(events_covered, dim=1)
+
+    if reduction == 'mean':
+        return torch.mean(percent_covered_per_sample)
+    elif reduction == 'none':
+        return percent_covered_per_sample
+
