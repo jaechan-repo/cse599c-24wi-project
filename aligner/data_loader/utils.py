@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 import torchaudio
 from typing import List, Optional, Tuple, Dict
-from ..utils.constants import *
+from aligner.utils.constants import *
 import pretty_midi as pm
 import pandas as pd
 from random import randrange
@@ -67,7 +67,7 @@ def pad_spectrogram(signal: torch.Tensor, timestamps: torch.Tensor) -> Tuple[tor
 
 def unfold_spectrogram(signal: torch.Tensor, timestamps: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """Unfolds the spectrogram into overlapping clips.
-    Applies approrpiate padding before unfolidng.
+    Applies appropriate padding before unfolidng.
 
     :param torch.Tensor signal: Mel spectrogram of size (n_mels, n_frames)
     :param torch.Tensor timestamps: timestamps in ms of size (n_frames)
@@ -90,7 +90,7 @@ def midi_to_pandas(uri: str, resolution: Optional[float] = None) -> pd.DataFrame
             columns=['event': float, 'onset': List[float], 'pitch': List[int]]
         If NOT specified, simply return:
             columns=['onset': float, 'pitch': int]
-    :return pd.DataFrame: dataframe/csv represnetation of the MIDI file
+    :return pd.DataFrame: dataframe/csv representation of the MIDI file
     """
     midi_pretty = pm.PrettyMIDI(uri)
 
@@ -153,7 +153,7 @@ def _find_smallest_event_interval_covering_timestamps(
 def find_random_subscore_covering_timestamps(
         midi: str | pd.DataFrame, timestamps: torch.Tensor) -> pd.DataFrame:
     """Finds a random subscore covering the timestamps.
-    WARNING: This function contains an RNG. Set seed beforehand for reproducbility.
+    WARNING: This function contains an RNG. Set seed beforehand for reproducibility.
 
     :param str | pd.DataFrame midi:
     :param torch.Tensor timestamps:
