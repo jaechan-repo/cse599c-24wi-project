@@ -19,14 +19,12 @@ class MaestroDataset(IterableDataset):
 
     def __init__(self, 
                  root_dir: str, # path to MAESTRO dataset
-                 split: Literal['train', 'validation', 'test'] = 'train',
-                 batch_size: int = 1):
+                 split: Literal['train', 'validation', 'test'] = 'train'):
 
         if split not in {'train', 'validation', 'test'}:
             raise TypeError("Allowed values for split: 'train', 'validation', 'test'")
 
         self.split = split
-        self.batch_size = batch_size
         self.metadata = pd.read_csv(os.path.join(root_dir, "maestro-v3.0.0.csv"))
         
         metadata_split = self.metadata[self.metadata['split'] == split]
