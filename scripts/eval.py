@@ -11,7 +11,7 @@ sys.path.append('..')
 from aligner.utils.metrics import temporal_distance_vec, binary_accuracy_vec, monotonicity_vec, score_coverage_vec
 from aligner.utils.metrics import compute_loss
 from aligner.utils.decode import max_decode, DTW
-from aligner.data_loader.data_loader import MaestroDataset
+from aligner.dataset import MaestroDataset
 
 # TODO: Update the following imports with actual model
 from aligner.model import Aligner
