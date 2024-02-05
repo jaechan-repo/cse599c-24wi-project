@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from torch import Tensor
+from torch import Tensor, LongTensor
 import torchaudio
 from typing import List, Optional, Tuple, NamedTuple
 from ..utils.constants import *
@@ -95,7 +95,6 @@ def unfold_spectrogram(signal: torch.Tensor) -> torch.Tensor:
         Clipped spectrogram. Size (n_clips, N_FRAMES_PER_CLIP, N_MELS)
     """
     signal = _pad_spectrogram(signal)
-    print(signal.shape)
     signal_clips = signal.unfold(dimension=0,
                                  size=N_FRAMES_PER_CLIP,
                                  step=N_FRAMES_PER_STRIDE)
@@ -182,7 +181,8 @@ class ParsedMIDI:
             "n_frames must exceed the span of frames inferred from the MIDI"
 
         self.fi2ei = {}     # frame index to event index
-        self.alignment_matrix = torch.zeros((n_frames, n_events), dtype=int)
+        self.alignment_matrix = torch.zeros((n_frames, n_events),
+                                            dtype=torch.int64)
         ei = 1 if self.events[1] == 0 else 0
 
         for fi in range(n_frames):
@@ -197,6 +197,8 @@ class ParsedMIDI:
                 break
 
             if self.events[ei + 1] == timestamp:
+                # If the current timestamp has reached the next event,
+                # advance to the next event.
                 ei += 1
 
             self.fi2ei[fi] = ei
@@ -207,52 +209,50 @@ class ParsedMIDI:
         ##############################################
 
         # Encoding
-        input_ids = [TOKEN_ID['[BOS]']]     # BOS
+        score_ids = [TOKEN_ID['[BOS]']]     # BOS
         event_idxes = [0]                   # BOS
 
         for _, row in self.midi.iterrows():
-            event_idxes.append(len(input_ids))
-            input_ids.append(TOKEN_ID['[event]'])
-            input_ids += row['pitch']
+            event_idxes.append(len(score_ids))
+            score_ids.append(TOKEN_ID['[event]'])
+            score_ids += row['pitch']
 
-        n_tokens = len(input_ids)
-        self.input_ids = torch.tensor(input_ids, dtype=int)
-        self.event_idxes = torch.tensor(event_idxes, dtype=int)
+        n_tokens = len(score_ids)
+        self.score_ids = torch.tensor(score_ids, dtype=torch.int64)
+        self.event_idxes = torch.tensor(event_idxes, dtype=torch.int64)
         assert self.event_idxes.shape == (n_events,)
         
-        # Local event attention mask
-        local_event_attn_mask = torch.zeros((n_tokens, n_tokens), dtype=int)
+        # Local self-attention mask
+        local_event_score_attn_mask = torch.zeros((n_tokens, n_tokens),
+                                                  dtype=torch.int64)
         for i, start in enumerate(self.event_idxes):
             end = n_tokens if i == n_events - 1 else self.event_idxes[i+1]
-            local_event_attn_mask[start:end, start:end] = 1
-        
-        # Global event attention mask
-        event_mask = torch.zeros((n_tokens,), dtype=int)
-        event_mask[self.event_idxes] = 1
-        global_event_attn_mask = torch.outer(event_mask, event_mask)
+            local_event_score_attn_mask[start:end, start:end] = 1
+
+        # Event mask
+        self.score_event_mask = torch.zeros((n_tokens,), dtype=torch.int64)
+        self.score_event_mask[self.event_idxes] = 1
+
+        # Global self-attention mask
+        global_event_score_attn_mask = torch.outer(self.score_event_mask,
+                                                   self.score_event_mask)
 
         # Aggregate the two attention masks
-        self.attn_mask = (local_event_attn_mask + global_event_attn_mask).clamp(max=1)
-        assert self.attn_mask.shape == (n_tokens, n_tokens)
+        self.score_attn_mask = (local_event_score_attn_mask + global_event_score_attn_mask).clamp(max=1)
+        assert self.score_attn_mask.shape == (n_tokens, n_tokens)
 
         # Projection from tokens to events
-        self.proj_to_evt = F.one_hot(self.event_idxes, num_classes=n_tokens)
+        self.proj_to_evt = F.one_hot(self.event_idxes, num_classes=n_tokens).long()
         assert self.proj_to_evt.shape == (n_events, n_tokens)
         
         # Size variables
         self.n_frames, self.n_events, self.n_tokens = n_frames, n_events, n_tokens
 
 
-    class Encoding(NamedTuple):
-        input_ids: Tensor
-        attn_mask: Tensor
-        proj_to_evt: Tensor
-
-
     def align(self,
               afi1: int, afi2: int,
               ei1: int, ei2: int
-              ) -> torch.Tensor:
+              ) -> LongTensor:
         """Outputs the gold alignment matrix that corresponds to
         audio frames in the range [afi1:afi2) and event indices
         in the range [ei1:ei2).
@@ -280,22 +280,30 @@ class ParsedMIDI:
         return Y
 
 
+    class Encoding(NamedTuple):
+        score_ids: LongTensor
+        score_event_mask: LongTensor
+        score_attn_mask: LongTensor
+        proj_to_evt: LongTensor
+
+
     def encode(self,
                ei1: int, ei2: int,
                return_tuple: bool = True
-               ) -> Encoding | Tensor:
+               ) -> Encoding | LongTensor:
         
         assert ei1 < ei2, "ei1 has to be less than ei2."
         assert 0 <= ei1 < ei2 <= self.n_events, "Invalid event indicies."
 
         toki1 = self.event_idxes[ei1]
-        toki2 = self.event_idxes[ei2] if ei2 < self.n_events else self.n_events
+        toki2 = self.event_idxes[ei2] if ei2 < self.n_events else self.n_tokens
 
         if return_tuple:
             return ParsedMIDI.Encoding(
-                input_ids=self.input_ids[toki1:toki2],
-                attn_mask=self.attn_mask[toki1:toki2, toki1:toki2],
+                score_ids=self.score_ids[toki1:toki2],
+                score_event_mask=self.score_event_mask[toki1:toki2],
+                score_attn_mask=self.score_attn_mask[toki1:toki2, toki1:toki2],
                 proj_to_evt=self.proj_to_evt[ei1:ei2, toki1:toki2]
             )
 
-        return self.input_ids[toki1:toki2]
+        return self.score_ids[toki1:toki2]
