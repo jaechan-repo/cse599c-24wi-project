@@ -29,7 +29,7 @@ class AlignTrainer(pl.LightningModule):
     def __init__(self):
         super().__init__()
         self.model = ScoreAlign(config=model_config)
-        self.criterion = nn.CrossEntropyLoss(ignore_index=TOKEN_ID['[BOS]'])
+        self.criterion = nn.CrossEntropyLoss(ignore_index=TOKEN_ID['[PAD]'])
         self.cpt_path = data_config.cpt_path
 
     def forward(self, encoder_input_tokens, decoder_target_tokens):

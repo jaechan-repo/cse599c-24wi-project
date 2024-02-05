@@ -1,11 +1,12 @@
+import torch
+import json
+import os
 from itertools import cycle
 from pathlib import Path
 from torch.utils.data import IterableDataset
 from typing import Literal, List, Dict, Iterator
-import torch
-import json
-import os
 from ..utils.constants import *
+# from aligner.utils.constants import *
 from .utils import load_spectrogram, unfold_spectrogram, \
         midi_to_pandas, midi_to_tokens, midi_to_matrix, \
         find_random_subscore_covering_timestamps
