@@ -16,7 +16,9 @@ _transform = torchaudio.transforms.MelSpectrogram(
     hop_length=HOP_LENGTH,
     n_mels=N_MELS,
     center=True
-    # pad waveform on both sides s.t. t'th frame centered at t * hop_length
+    # pad waveform on b
+    
+    hellooth sides s.t. t'th frame centered at t * hop_length
 )
 
 
