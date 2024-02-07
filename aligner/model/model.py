@@ -192,7 +192,7 @@ class TheAligner(nn.Module):
     score_embs_events = torch.matmul(score_embs.permute(0, 2, 1), event_proj).permute(0, 2, 1).to(self.device) # [bsz, max_num_events, hid_dim_score]
     print(score_embs_events, score_embs_events.shape)
     score_embs = self.proj(score_embs_events) # [bsz, max_num_events, hid_dim_audio]
-    spect_embs = self.spectAligner(audio_embs, score_embs, x_attn_mask) # [bsz, num_frames, hid_dim_audio] #SUS
+    spect_embs = self.spectAligner(audio_embs, score_embs, x_attn_mask) # [bsz, num_frames, hid_dim_audio] 
     # print("spect_embs", spect_embs, spect_embs.shape)
     # print("score_embs", score_embs, score_embs.shape)
     output = self.cross(audio_embs, score_embs, x_attn_mask) # [bsz, num_frames, max_num_events]
