@@ -1,3 +1,5 @@
+from typing import Dict
+
 # Time - Audio
 SAMPLE_RATE = 32000
 HOP_LENGTH = 320     # 10 ms hop duration
@@ -18,7 +20,7 @@ MEL_FMIN = 20.0
 MEL_FMAX = 7600.0
 
 # Token id
-TOKEN_ID = {
+TOKEN_ID: Dict[str, int] = {
     '[BOS]': 128,   # beginning of score
     '[event]': 129, # event marker
     '[PAD]': 130,   # end of score / padding
