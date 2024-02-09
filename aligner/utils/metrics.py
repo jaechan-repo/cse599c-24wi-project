@@ -24,7 +24,8 @@ def compute_loss(
     # Cross-entropy loss
     loss = torch.nn.functional.binary_cross_entropy(Y_pred, Y)
 
-    # TODO: Monotonicity constraint @Jaechan.
+    # Monotonicity constraint
+    assert monotonicity(Y_pred, midi_event_timestamps)
 
     if reduction == 'mean':
         return loss.mean()

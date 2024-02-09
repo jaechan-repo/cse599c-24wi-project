@@ -10,6 +10,7 @@ from aligner.dataset import MaestroDataset
 from aligner.utils.constants import *
 from aligner.model import ScoreAlign
 from aligner.utils.constants import *
+from aligner.utils.metrics import monotonicity
 # from aligner.config.data_config import data_config
 # from aligner.config.model_config import model_config
 
@@ -44,13 +45,16 @@ class AlignTrainer(pl.LightningModule):
         self.criterion_unreduced = nn.BCELoss(reduction='none')
 
 
-    def criterion(self, Y_hat_b: Tensor, Y_hat: Tensor):
+    def criterion(self, Y_hat_b: Tensor, Y_hat: Tensor, midi_event_timestamps: Tensor):
         assert Y_hat_b.shape == Y_hat.shape
         assert Y_hat_b.dtype == Y_hat.dtype
 
         loss = self.criterion_unreduced(Y_hat_b, Y_hat)
         assert loss.shape[0] == trainer_config.batch_size
         assert loss.shape[1] == N_FRAMES_PER_CLIP
+
+        # Monotonicity constraint
+        assert monotonicity(Y_hat, midi_event_timestamps)
 
         loss = torch.mean(torch.sum(torch.mean(loss, dim=-1), dim=-1), dim=-1)
         return loss
@@ -101,7 +105,7 @@ class AlignTrainer(pl.LightningModule):
         if (batch_idx + 1) % (trainer_config.checking_steps / trainer_config.batch_size) == 0:
             torch.save(model.state_dict(), self.cpt_path + '/' + str((batch_idx+1) * trainer_config.batch_size) + '.ckpt')
 
-        loss = self.criterion(Y_hat_b, batch.Y_b.float())
+        loss = self.criterion(Y_hat_b, batch.Y_b.float(), batch.midi_event_timestamps)
         self.log("train/loss", loss)
         return loss
 
