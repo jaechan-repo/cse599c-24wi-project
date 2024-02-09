@@ -126,7 +126,7 @@ class AlignTrainer(pl.LightningModule):
             xattn_mask=xattn_mask
         )
 
-        loss = self.criterion(Y_hat_b, batch.Y_b.float())
+        loss = self.criterion(Y_hat_b, batch.Y_b.float(), batch.midi_event_timestamps)
         self.log("train/loss", loss)
         return loss
 
