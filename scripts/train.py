@@ -45,16 +45,16 @@ class AlignTrainer(pl.LightningModule):
         self.criterion_unreduced = nn.BCELoss(reduction='none')
 
 
-    def criterion(self, Y_hat_b: Tensor, Y_hat: Tensor, midi_event_timestamps: Tensor):
-        assert Y_hat_b.shape == Y_hat.shape
-        assert Y_hat_b.dtype == Y_hat.dtype
+    def criterion(self, Y_hat_b: Tensor, Y_b: Tensor, midi_event_timestamps: Tensor):
+        assert Y_hat_b.shape == Y_b.shape
+        assert Y_hat_b.dtype == Y_b.dtype
 
-        loss = self.criterion_unreduced(Y_hat_b, Y_hat)
+        loss = self.criterion_unreduced(Y_hat_b, Y_b)
         assert loss.shape[0] == trainer_config.batch_size
         assert loss.shape[1] == N_FRAMES_PER_CLIP
 
         # Monotonicity constraint
-        assert monotonicity(Y_hat, midi_event_timestamps)
+        assert monotonicity(Y_hat_b, midi_event_timestamps)
 
         loss = torch.mean(torch.sum(torch.mean(loss, dim=-1), dim=-1), dim=-1)
         return loss
