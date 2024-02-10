@@ -230,20 +230,16 @@ class ParsedMIDI:
             local_event_score_attn_mask[start:end, start:end] = 1
 
         # Event mask
-        self.score_event_mask = torch.zeros((n_tokens,), dtype=torch.int64)
-        self.score_event_mask[self.event_idxes] = 1
+        self.event_padding_mask = torch.zeros((n_tokens,), dtype=torch.int64)
+        self.event_padding_mask[self.event_idxes] = 1
 
         # Global self-attention mask
-        global_event_score_attn_mask = torch.outer(self.score_event_mask,
-                                                   self.score_event_mask)
+        global_event_score_attn_mask = torch.outer(self.event_padding_mask,
+                                                   self.event_padding_mask)
 
         # Aggregate the two attention masks
         self.score_attn_mask = (local_event_score_attn_mask + global_event_score_attn_mask).clamp(max=1)
         assert self.score_attn_mask.shape == (n_tokens, n_tokens)
-
-        # Projection from tokens to events
-        self.proj_to_evt = F.one_hot(self.event_idxes, num_classes=n_tokens).long()
-        assert self.proj_to_evt.shape == (n_events, n_tokens)
         
         # Size variables
         self.n_frames, self.n_events, self.n_tokens = n_frames, n_events, n_tokens
@@ -282,9 +278,8 @@ class ParsedMIDI:
 
     class Encoding(NamedTuple):
         score_ids: LongTensor
-        score_event_mask: LongTensor
+        event_padding_mask: LongTensor
         score_attn_mask: LongTensor
-        proj_to_evt: LongTensor
 
 
     def encode(self,
@@ -301,9 +296,8 @@ class ParsedMIDI:
         if return_tuple:
             return ParsedMIDI.Encoding(
                 score_ids=self.score_ids[toki1:toki2],
-                score_event_mask=self.score_event_mask[toki1:toki2],
-                score_attn_mask=self.score_attn_mask[toki1:toki2, toki1:toki2],
-                proj_to_evt=self.proj_to_evt[ei1:ei2, toki1:toki2]
+                event_padding_mask=self.event_padding_mask[toki1:toki2],
+                score_attn_mask=self.score_attn_mask[toki1:toki2, toki1:toki2]
             )
 
         return self.score_ids[toki1:toki2]
