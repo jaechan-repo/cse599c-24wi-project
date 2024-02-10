@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from typing import Literal, List, Iterator, NamedTuple, Tuple
 import torch
 import torch.nn.functional as F
-from torch import Tensor, LongTensor
+from torch import Tensor, LongTensor, BoolTensor
 import os
 from ..utils.constants import *
 from .toolbox import ParsedMIDI, load_spectrogram, unfold_spectrogram, sample_interval
@@ -47,23 +47,20 @@ class MaestroDataset(IterableDataset):
                 clip.
             audio_frames (Tensor): ~10 sec spectrogram. 
                 Size: (N_MELS, N_FRAMES_PER_CLIP).
-            score_ids (LongTensor): Tokenization (int array representation) of the MIDI. 
+            score_ids (BoolTensor): Tokenization (int array representation) of the MIDI. 
                 This is the encoding that the transformer receives. Size: (n_tokens,).
-            score_event_mask (LongTensor): Marks the positions of event markers in the
+            event_padding_mask (BoolTensor): Marks the positions of event markers in the
                 score_ids with 1s, the rest with 0s. Size: (n_tokens,)
-            score_attn_mask (LongTensor): Self-attention mask for the score encoder.
+            score_attn_mask (BoolTensor): Self-attention mask for the score encoder.
                 Size: (n_tokens, n_tokens).
-            proj_to_evt (LongTensor): Linear projection matrix that extracts only the
-                event markers from the tokenization. Size: (n_events, n_tokens).
             Y (Tensor): gold alignment matrix. Size: (N_FRAMES_PER_CLIP, n_events).
         """
         id_: Tuple[int, int]
         audio_frames: Tensor
         score_ids: LongTensor
-        score_event_mask: LongTensor
-        score_attn_mask: LongTensor
-        proj_to_evt: LongTensor
-        Y: LongTensor
+        event_padding_mask: BoolTensor
+        score_attn_mask: BoolTensor
+        Y: BoolTensor
 
 
     class ItemWithMetadata(Item):
@@ -91,12 +88,11 @@ class MaestroDataset(IterableDataset):
         the fields in `Item`, whose 0th dimension is now the batch size.
         """
         id_b: List[Tuple[int, int]]
-        audio_frames_b: Tensor              # (B, N_FRAMES_PER_CLIP, N_MELS)
-        score_ids_b: LongTensor             # (B, max_n_tokens)
-        score_event_mask_b: LongTensor      # (B, max_n_tokens)
-        score_attn_mask_b: LongTensor       # (B, max_n_tokens, max_n_tokens)
-        proj_to_evt_b: List[LongTensor]     # (B) (n_events, max_n_tokens)
-        Y_b: LongTensor                     # (B, N_FRAMES_PER_CLIP, max_n_tokens)
+        audio_frames_b: Tensor              # (, N_FRAMES_PER_CLIP, N_MELS)
+        score_ids_b: LongTensor             # (, max_n_tokens)
+        event_padding_mask_b: BoolTensor    # (, max_n_tokens)
+        score_attn_mask_b: BoolTensor       # (, max_n_tokens, max_n_tokens)
+        Y_b: BoolTensor                     # (, N_FRAMES_PER_CLIP, max_n_events)
 
 
     def _preprocess(self) -> Iterator[Item]:
@@ -123,6 +119,7 @@ class MaestroDataset(IterableDataset):
                         score_ids = midi.encode(ei1, ei2, return_tuple=False) # O(1)
                         if len(score_ids) < MAX_N_TOKENS: break
                 else:
+                    # TODO
                     afi1, afi2 = _afi1, _afi2
                     ei1, ei2 = midi.fi2ei[afi1], midi.fi2ei[afi2-1]+1
 
@@ -182,39 +179,35 @@ class MaestroDataset(IterableDataset):
         )
         assert score_ids_b.shape == (batch_size, max_n_tokens)
 
-        # Batch score_event_mask
-        tensors = [item.score_event_mask for item in batch]
-        score_event_mask_b: LongTensor = torch.stack(
-            [F.pad(t, (0, max_n_tokens-len(t)), value=0) for t in tensors]
+        # Batch event_padding_mask
+        tensors = [item.event_padding_mask for item in batch]
+        event_padding_mask_b: BoolTensor = torch.stack(
+            [F.pad(t, (0, max_n_tokens-len(t)), value=False) for t in tensors]
         )
-        assert score_event_mask_b.shape == (batch_size, max_n_tokens)
+        assert event_padding_mask_b.shape == (batch_size, max_n_tokens)
 
         # Batch score_attn_mask
         tensors = [item.score_attn_mask for item in batch]
-        score_attn_mask_b: LongTensor = torch.stack(
+        score_attn_mask_b: BoolTensor = torch.stack(
             [F.pad(t, 
-                (0, max_n_tokens-t.size(1), 0, max_n_tokens-t.size(0)), value=0
+                (0, max_n_tokens-t.size(1), 0, max_n_tokens-t.size(0)), value=False
             ) for t in tensors]
         )
         assert score_attn_mask_b.shape == (batch_size, max_n_tokens, max_n_tokens)
 
         # Batch alignment matrix Y
-        Y_b, proj_to_evt_b = [], []
-        for item in batch:
-            Y, proj = item.Y, item.proj_to_evt
-            proj = F.pad(proj, (0, max_n_tokens - proj.size(1)), value=0)
-            Y_token = Y @ proj
-            Y_b.append(Y_token)
-            proj_to_evt_b.append(proj)
-        Y_b: LongTensor = torch.stack(Y_b)
+        tensors = [item.Y for item in batch]
+        max_n_events = max(len(t) for t in tensors)
+        Y_b: BoolTensor = torch.stack([
+            F.pad((0, 0, 0, max_n_events-t.size(0)), value=False) for t in tensors
+        ])
         assert Y_b.shape == (batch_size, N_FRAMES_PER_CLIP, max_n_tokens)
 
         return MaestroDataset.Batch(
             id_b=id_b,
             audio_frames_b=audio_frames_b,
             score_ids_b=score_ids_b,
-            score_event_mask_b=score_event_mask_b,
+            event_padding_mask_b=event_padding_mask_b,
             score_attn_mask_b=score_attn_mask_b,
-            proj_to_evt_b=proj_to_evt_b,
             Y_b=Y_b
         )

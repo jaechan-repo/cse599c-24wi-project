@@ -2,16 +2,14 @@ import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
-from torch import Tensor, LongTensor
+from torch import Tensor, LongTensor, BoolTensor
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 
 from aligner.dataset import MaestroDataset
 from aligner.utils.constants import *
-from aligner.model import ScoreAlign
+from aligner.model import AlignerModel, ModelConfig
 from aligner.utils.constants import *
-# from aligner.config.data_config import data_config
-# from aligner.config.model_config import model_config
 
 from typing import NamedTuple
 import gc
@@ -22,80 +20,57 @@ num_gpus = 1
 
 
 class TrainerConfig(NamedTuple):
-    learning_rate: float
-    training_steps: int
-    checking_steps: int
-    batch_size: int
+    learning_rate: float = 1e-4
+    training_steps: int = 10**6
+    checking_steps: int = 10**5
+    batch_size: int = 1
 
-trainer_config = TrainerConfig(
-    learning_rate=1e-4,
-    training_steps=10**6,
-    checking_steps=10*5,    # # steps after which a training checkpoint is saved
-    batch_size=1
-)
+trainer_config = TrainerConfig()
 
 
 class AlignTrainer(pl.LightningModule):
 
     def __init__(self):
         super().__init__()
-
-        self.model = ScoreAlign()
+        self.model_config = ModelConfig()
+        self.model = AlignerModel(**self.model_config._asdict())
         self.criterion_unreduced = nn.BCELoss(reduction='none')
 
 
-    def criterion(self, Y_hat_b: Tensor, Y_hat: Tensor):
-        assert Y_hat_b.shape == Y_hat.shape
-        assert Y_hat_b.dtype == Y_hat.dtype
+    def criterion(self, Y_hat: Tensor, Y: Tensor):
+        assert Y_hat.shape == Y.shape
+        assert Y_hat.dtype == Y.dtype
 
-        loss = self.criterion_unreduced(Y_hat_b, Y_hat)
+        loss = self.criterion_unreduced(Y_hat, Y)
         assert loss.shape[0] == trainer_config.batch_size
         assert loss.shape[1] == N_FRAMES_PER_CLIP
 
-        loss = torch.mean(torch.sum(torch.mean(loss, dim=-1), dim=-1), dim=-1)
+        # loss = torch.mean(torch.sum(torch.mean(loss, dim=-1), dim=-1), dim=-1)
+        loss = torch.mean(loss)
         return loss
 
 
-    # TODO: Fix according to the API suggested by the model
     def forward(self,
                 audio_frames: Tensor,
                 score_ids: LongTensor,
-                score_attn_mask: LongTensor,
-                xattn_mask: LongTensor
+                score_attn_mask: BoolTensor,
+                event_padding_mask: BoolTensor
                 ) -> Tensor:
+        """See: `aligner.model.AlignerModel`
         """
-        Args:
-            audio_frames (Tensor): Audio input representation.
-                Size: (B, N_FRAMES_PER_CLIP, N_MELS)
-            score_ids (LongTensor): Score input represnetation.
-                Size: (B, max_n_tokens)
-            score_attn_mask (LongTensor): Attention mask to be applied to the
-                self-attention layers of the score encoder.
-                Size: (B, max_n_tokens, max_n_tokens).
-            xattn_mask (LongTensor): Attention mask to be applied to the
-                intermediate cross-attention layers and the output layer.
-                Size: (B, N_FRAMES_PER_CLIP, max_n_tokens).
-
-        Returns:
-            Tensor: Alignment matrix Y_hat.
-                    Size: (B, N_FRAMES_PER_CLIP, max_n_tokens).
-        """
-        return self.model(audio_frames, score_ids, score_attn_mask, xattn_mask)
+        return self.model(audio_frames, score_ids,
+                          score_attn_mask, event_padding_mask)
 
 
     def training_step(self,
                       batch: MaestroDataset.Batch,
                       batch_idx: int):
 
-        xattn_mask: LongTensor = batch.score_event_mask_b.repeat(0, N_FRAMES_PER_CLIP)
-        assert xattn_mask.shape == batch.Y_b.shape
-
-        # TODO: Fix according to the API suggested by the model
         Y_hat_b = self.forward(
             audio_frames=batch.audio_frames_b,
             score_ids=batch.score_ids_b,
             score_attn_mask=batch.score_attn_mask_b,
-            xattn_mask=xattn_mask,
+            event_padding_mask=batch.event_padding_mask_b
         )
 
         if (batch_idx + 1) % (trainer_config.checking_steps / trainer_config.batch_size) == 0:
@@ -107,19 +82,13 @@ class AlignTrainer(pl.LightningModule):
 
 
     @torch.no_grad()
-    def validation_step(self, 
-                        batch: MaestroDataset.Batch,
-                        batch_idx: int):
-        
-        xattn_mask: LongTensor = batch.score_event_mask_b.repeat(0, N_FRAMES_PER_CLIP)
-        assert xattn_mask.shape == batch.Y_b.shape
+    def validation_step(self, batch: MaestroDataset.Batch, *_):
 
-        # TODO: Fix according to the API suggested by the model
         Y_hat_b = self.forward(
             audio_frames=batch.audio_frames_b,
             score_ids=batch.score_ids_b,
             score_attn_mask=batch.score_attn_mask_b,
-            xattn_mask=xattn_mask
+            event_padding_mask=batch.event_padding_mask_b
         )
 
         loss = self.criterion(Y_hat_b, batch.Y_b.float())

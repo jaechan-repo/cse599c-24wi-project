@@ -1,199 +1,404 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch import Tensor
+from torch import Tensor, BoolTensor, LongTensor, NamedTuple
+from typing import Optional
+from ..utils.constants import *
 
-class MultiHeadAlibiSelfAttentionLayer(nn.Module):
-    def __init__(self, input_dim, hid_dim, n_heads, dropout=0, device="cuda"):
-        super().__init__()
 
-        assert hid_dim % n_heads == 0
+class ModelConfig(NamedTuple):
+    vocab_size: int = max(TOKEN_ID) + 1,
+    d_score: int = 64,
+    n_heads_score: int = 4
 
-        self.hid_dim = hid_dim
-        self.n_heads = n_heads
-        self.head_dim = hid_dim // n_heads
+    d_audio: int = N_MELS
 
-        self.fc_q = nn.Linear(input_dim, hid_dim).to(device)
-        self.fc_k = nn.Linear(input_dim, hid_dim).to(device)
-        self.fc_v = nn.Linear(input_dim, hid_dim).to(device)
+    n_heads_score: int = 4
+    attn_dropout_score: float = 0.0
+    ffn_dropout_score: float = 0.5
+    n_layers_score: int = 5
 
-        self.fc_o = nn.Linear(hid_dim, hid_dim).to(device)
+    n_heads_audio: int = 8
+    attn_dropout_audio: float = 0.0
+    ffn_dropout_audio: float = 0.5
+    n_layers_audio: int = 5
+
+
+class MultiheadALiBiSelfAttention(nn.Module):
+
+    def __init__(self,
+                 d_embed: int,
+                 n_heads: int,
+                 dropout: float = 0.0,
+                 d_k: Optional[int] = None):
+        """
+        Args:
+            d_embed (int): Input embedding dimension.
+            n_heads (int): Number of attention heads.
+            d_k (Optional[int]): Key dimension. 
+                    Defaults to d_embed if not specified.
+            dropout (float, optional): Probability of attention dropout.
+                    Defaults to 0.
+        """
+        super(MultiheadALiBiSelfAttention, self).__init__()
+
+        assert d_embed % n_heads == 0
+
+        if d_k is not None:
+            d_k = d_embed
+
+        self.d_embed = d_embed  # 64
+        self.d_k = d_k
+        self.n_heads = n_heads  # 4
+
+        self.d_kh = d_k / n_heads
+        self.d_vh = d_embed / n_heads
+
+        self.fc_q = nn.Linear(d_embed, d_k)
+        self.fc_k = nn.Linear(d_embed, d_k)
+        self.fc_v = nn.Linear(d_embed, d_embed)
 
         self.dropout = nn.Dropout(dropout)
+        self.scale = torch.sqrt(torch.Tensor([self.d_kh]))
 
-        self.scale = torch.sqrt(torch.FloatTensor([self.head_dim])).to(device)
 
-
-    def forward(self, input, padding_mask = None):
+    def forward(self,
+                embed: Tensor,
+                attn_mask: Optional[BoolTensor] = None
+                ) -> Tensor:
         """
-          input: [bsz, seq_len, input_dim]
-          padding_mask: [bsz, seq_len]
+        Args:
+            embed (Tensor): Input embeddings. Size: (batch_size, seq_len, d_embed)
+            attn_mask (Optional[BoolTensor]): Boolean attention mask.
+                    Size: (batch_size, seq_len, seq_len)
+
+        Returns:
+            Tensor: Contextualized embeddings of the same size as the input.
         """
+        batch_size, seq_len, d_embed = embed.shape
+        assert d_embed == self.d_embed
 
-        batch_size = input.shape[0]
-        len_k = input.shape[1]
-        len_q = input.shape[1]
-        len_v = input.shape[1]
+        Q: Tensor = self.fc_q(embed)    # (batch_size, seq_len, d_k)
+        K: Tensor = self.fc_k(embed)    # (batch_size, seq_len, d_k)
+        V: Tensor = self.fc_v(embed)    # (batch_size, seq_len, d_v)
 
-        query = self.fc_q(input)
-        key = self.fc_k(input)
-        value = self.fc_v(input)
-
-        r = torch.arange(len_k)
+        ############################################
+        ################ ALiBi: BEGIN ##############
+        ############################################
+        r = torch.arange(seq_len)
         pos = torch.abs(r.unsqueeze(0) - r.unsqueeze(1))
-
-        step = 8/self.n_heads
+        step = 8 / self.n_heads
         ms = torch.pow(2, -torch.arange(step, 8+step, step)).view(-1, 1, 1)
+        ALiBi = (ms * pos.unsqueeze(0).repeat(self.n_heads, 1, 1)).unsqueeze(0)
+        ############################################
+        ################# ALiBi: END ###############
+        ############################################
 
-        alibi = (ms * pos.unsqueeze(0).repeat(self.n_heads, 1, 1)).unsqueeze(0).cuda()
+        Q_h = Q.view(batch_size, -1, self.n_heads, self.d_hk).permute(0, 2, 1, 3)
+        K_h = K.view(batch_size, -1, self.n_heads, self.d_hk).permute(0, 2, 1, 3)
+        assert Q_h.shape == K_h.shape == (batch_size, self.n_heads, seq_len, self.d_hk)
 
-        r_q1 = query.view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3) # bsz, n_heads, l, head_dim
-        r_k1 = key.view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3) # bsz, n_heads, l, head_dim
-        attn = torch.matmul(r_q1, r_k1.permute(0, 1, 3, 2)) # bsz, n_heads, l, l. the attention matrix
+        # Scaled dot product
+        attn = Q_h @ K_h.transpose(2, 3)
+        attn -= ALiBi
+        attn /= self.scale
+        assert attn.shape == (batch_size, self.n_heads, seq_len, seq_len)
 
-        attn = (attn - alibi) / self.scale
+        if attn_mask is not None:
+            attn_mask = attn_mask.float().unsqueeze(1)
+            attn = attn.masked_fill(attn_mask == 0, float('-inf'))
 
-        if padding_mask is not None:
-            padding_mask = padding_mask.unsqueeze(1).cuda() # B 1 l l
-            attn = attn.masked_fill(padding_mask == 0, float('-inf'))
+        # Each query embedding receives a probability distribution
+        attn = self.dropout(torch.softmax(attn, dim=-1))
+        V_h = V.view(batch_size, seq_len, self.n_heads, self.d_vh).permute(0, 2, 1, 3)
 
-        attn = self.dropout(torch.softmax(attn, dim = -1))
+        out = attn @ V_h
+        assert out.shape == (batch_size, self.n_heads, seq_len, self.d_vh)
 
-        #attn = [batch size, n heads, query len, key len]
-        r_v1 = value.view(batch_size, -1, self.n_heads, self.head_dim).permute(0, 2, 1, 3)
-        weight1 = torch.matmul(attn, r_v1)
+        out = out.permute(0, 2, 1, 3).contiguous()
+        assert out.shape == (batch_size, out, self.n_heads, self.d_vh)
 
-        x = weight1
+        out = out.view(batch_size, seq_len, self.d_embed)
+        out = self.fc_o(out)
+        assert out.shape == embed.shape
 
-        #x = [batch size, n heads, query len, head dim]
+        return out
 
-        x = x.permute(0, 2, 1, 3).contiguous()
 
-        #x = [batch size, query len, n heads, head dim]
+class ScoreEncoderBlock(nn.Module):
 
-        x = x.view(batch_size, -1, self.hid_dim)
+    def __init__(self,
+                 d_embed: int,
+                 n_heads: int,
+                 attn_dropout: float = 0.0,
+                 ffn_dropout: float = 0.5,
+                 ffn_expansion: int = 4):
+        super(ScoreEncoderBlock, self).__init__()
 
-        #x = [batch size, query len, hid dim]
+        self.self_attn = MultiheadALiBiSelfAttention(d_embed, n_heads, attn_dropout)
 
-        x = self.fc_o(x)
+        self.norm1 = nn.LayerNorm(d_embed)
+        self.norm2 = nn.LayerNorm(d_embed)
 
-        #x = [batch size, query len, hid dim]
+        self.ffn = nn.Sequential(
+            nn.Linear(d_embed, ffn_expansion * d_embed),
+            nn.ReLU(),
+            nn.Linear(ffn_expansion * d_embed, d_embed),
+        )
 
-        return x
+        self.dropout = nn.Dropout(ffn_dropout)
 
-class CrossAttentionAlignerLayer (nn.Module):
-  def __init__(self, hid_dim, n_heads, dropout=0.5, device="cuda"):
-    super().__init__()
-    self.q_emb = nn.Linear(hid_dim, hid_dim)
-    self.k_emb = nn.Linear(hid_dim, hid_dim)
-    self.v_emb = nn.Linear(hid_dim, hid_dim)
-    self.x_attention = nn.MultiheadAttention(hid_dim, n_heads, dropout, batch_first=True)
 
-  def forward(self, score_embs, audio_embs, x_attn_mask=None):
+    def forward(self,
+                embed: Tensor,
+                attn_mask: Optional[Tensor] = None
+                ) -> Tensor:
+        out1 = self.self_attn(embed, attn_mask)
+        out1 = self.dropout(self.norm1(out1 + embed))
+
+        out2 = self.ffn(out1)
+        out2 = self.dropout(self.norm2(out2 + out1))
+        assert out2.shape == embed.shape
+        return out2
+
+
+class ScoreEncoder(nn.Module):
+
+    def __init__(self,
+                 vocab_size: int,
+                 d_score: int,
+                 n_heads: int,
+                 attn_dropout: float = 0.0,
+                 ffn_dropout: float = 0.5,
+                 ffn_expansion: int = 4,
+                 n_layers: int = 5):
+        super(ScoreEncoder, self).__init__()
+
+        self.lookup_embed = nn.Embedding(vocab_size, d_score,
+                                         padding_idx=TOKEN_ID['[PAD]'])
+
+        self.encoder_blocks = nn.ModuleList([
+            ScoreEncoderBlock(
+                d_score, n_heads, attn_dropout, ffn_dropout, ffn_expansion
+            ) for _ in range(n_layers)
+        ])
+
+
+    def forward(self,
+                input_ids: LongTensor,
+                attn_mask: Optional[BoolTensor] = None
+                ) -> Tensor:
+        embed: Tensor = self.lookup_embed(input_ids)
+        for block in self.encoder_blocks:
+            embed = block(embed, attn_mask)
+        return embed
+  
+
+class AudioEncoderBlock(nn.Module):
+
+    def __init__(self,
+                 d_audio: int,
+                 d_score: int,
+                 n_heads: int,
+                 attn_dropout: float = 0.0,
+                 ffn_dropout: float = 0.5,
+                 ffn_expansion: int = 4):
+        super(AudioEncoderBlock, self).__init__()
+
+        self.self_attn = MultiheadALiBiSelfAttention(d_audio, n_heads, attn_dropout)
+
+        self.fc_q = nn.Linear(d_audio, d_score)     # for cross-attention
+        self.fc_k = nn.Linear(d_score, d_score)     # for cross-attention
+        self.fc_v = nn.Linear(d_score, d_audio)     # for cross-attention
+        self.xattn = nn.MultiheadAttention(d_audio, n_heads, attn_dropout,
+                                           batch_first=True)
+
+        self.norm1 = nn.LayerNorm(d_audio)
+        self.norm2 = nn.LayerNorm(d_audio)
+        self.norm3 = nn.LayerNorm(d_audio)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_audio, ffn_expansion * d_audio),
+            nn.ReLU(),
+            nn.Linear(ffn_expansion * d_audio, d_audio),
+        )
+        self.dropout = nn.Dropout(ffn_dropout)
+
+
+    def forward(self, 
+                audio_embed: Tensor, 
+                event_embed: Tensor,
+                event_padding_mask: Optional[BoolTensor] = None):
+
+        ### Step 1: Self-attention ###
+        out1 = self.self_attn(audio_embed)
+        out1 = self.dropout(self.norm1(out1 + audio_embed)) # residual
+        assert out1.shape == audio_embed.shape
+        
+        ### Step 2: Cross-attention ###
+        Q_audio: Tensor = self.fc_q(out1)
+        K_event: Tensor = self.fc_k(event_embed)
+        V_event: Tensor = self.fc_v(event_embed)
+        out2 = self.xattn(Q_audio, K_event, V_event,
+                    key_padding_mask=event_padding_mask,
+                    need_weights=False)
+        out2 = self.dropout(self.norm2(out2 + out1))
+        assert out2.shape == out1.shape
+
+        ### Step 3: Feedforward network ###
+        out3 = self.ffn(out2)
+        out3 = self.dropout(self.norm3(out3 + out2))
+        assert out3.shape == out2.shape
+
+        return out3
+    
+
+class AudioEncoder(nn.Module):
+
+    def __init__(self,
+                 d_audio: int,
+                 d_score: int,
+                 n_heads: int,
+                 attn_dropout: float = 0.0,
+                 ffn_dropout: float = 0.5,
+                 ffn_expansion: int = 4,
+                 n_layers: int = 5):
+        super(AudioEncoder, self).__init__()
+
+        self.encoder_blocks = nn.ModuleList([AudioEncoderBlock(
+            d_audio, d_score, n_heads,
+            attn_dropout, ffn_dropout, ffn_expansion
+        ) for _ in range(n_layers)])
+
+
+    def forward(self,
+                audio_frames: Tensor,
+                event_embed: Tensor,
+                event_padding_mask: Optional[BoolTensor] = None
+                ) -> Tensor:
+        out = audio_frames
+        for block in self.encoder_blocks:
+            out = block(out, event_embed, event_padding_mask)
+        return out
+
+
+class CrossAttentionHead(nn.Module):
+    """Alignment head implemented as cross-attention.
+    The only learnable components are the query and key projectors.
     """
-      score_embs: (bsz, max_num_events, hid_dim)
-      audio_embs: (bsz, audio_length, hid_dim)
-      x_attn_mask: (bsz, max_num_events)
-    """
-    query = self.q_emb(audio_embs)
-    key = self.k_emb(score_embs)
-    value = self.v_emb(score_embs)
 
-    output = self.x_attention(query, key, value, x_attn_mask)[0]
-    return output
-
-class ScoreAlignerLayer (nn.Module):
-  def __init__(self, vocab_size, hid_dim, n_heads, dropout=0.5, num_layers=5, device="cuda"):
-      super(ScoreAlignerLayer, self).__init__()
-      # print("OK2")
-      self.embed = nn.Linear(vocab_size, hid_dim).to(device)
-      self.self_attn = [MultiHeadAlibiSelfAttentionLayer(input_dim=hid_dim, hid_dim=hid_dim, n_heads=n_heads, dropout=dropout, device=device).to(device) for i in range(num_layers)]
-      self.num_layers = num_layers
-
-  def forward(self, input, score_mask=None):
-      """
-        input: [B, score_length, vocab_size], one hots
-        score_mask: [B, score_length, score_length]
-      """
-
-      embs = self.embed(input)
-      tmp = embs
-      for i in range(self.num_layers):
-        tmp = self.self_attn[i](tmp, score_mask)
+    def __init__(self, d_audio: int, d_score: int):
+        super().__init__()
+        self.fc_q = nn.Linear(d_audio, d_score)
+        self.fc_k = nn.Linear(d_score, d_score)
 
 
-      return tmp
+    def forward(self,
+                audio_embed: Tensor,
+                event_embed: Tensor,
+                event_padding_mask: Optional[BoolTensor] = None
+                ) -> Tensor:
+        
+        batch_size, n_frames, _ = audio_embed.shape
+        _, max_n_events, _ = event_embed.shape
 
-class SpectrogramAlignerLayer(nn.Module):
-  def __init__(self, input_dim, hid_dim, n_heads, dropout=0.5, num_layers=5, device="cuda"): # score representation
-      super(SpectrogramAlignerLayer, self).__init__()
-      self.num_layers = num_layers
-      # print("***", num_layers)
-      # print(input_dim, hid_dim, n_heads, dropout, device, num_layers)
-      self.self_attn = [MultiHeadAlibiSelfAttentionLayer(input_dim=input_dim, hid_dim=hid_dim, n_heads=n_heads, dropout=dropout, device=device).to(device) for i in range(num_layers)]
-      self.x_attn = [CrossAttentionAlignerLayer(hid_dim, n_heads, dropout).to(device) for i in range(num_layers)]
-      self.num_layers = num_layers
-      # print(self.self_attn)
-      # print("OK")
+        Q: Tensor = self.fc_q(audio_embed)
+        K: Tensor = self.fc_k(event_embed)
+        attn = Q @ K.transpose(1, 2)
+        assert attn.shape == (batch_size, n_frames, max_n_events)
 
-  def forward(self, audio_embs, score_embs, x_attn_mask=None):
-      """
-        audio_embs: [B, num_frames, input_dim]
-        score_embs: [B, max_num_events, hid]
-        x_attn_mask: [B, max_num_events]
-      """
-      tmp = audio_embs
-      # print("*****")
-      # print(score_embs)
-      for i in range(self.num_layers):
-          # print("+", i)
-          tmp = self.self_attn[i](tmp)
-          # print("-", i, x_attn_mask.type(), tmp.shape)
-          tmp = self.x_attn[i](score_embs, tmp, x_attn_mask)
-          # print('/', i, tmp)
+        if event_padding_mask is not None:
+            attn = attn.masked_fill(event_padding_mask == 0, float('-inf'))
 
-      return tmp
+        return torch.softmax(attn, dim=-1)
+    
 
-class CrossAttnMatrix(nn.Module):
-  def __init__(self):
-    super().__init__()
+class AlignerModel(nn.Module):
 
-  def forward(self, audio_embs, score_embs, x_attn_mask=None):
-    """
-      audio_embs: (bsz, num_frames, dim)
-      score_embs: (bsz, max_num_events, dim)
-      x_attn_mask: (bsz, max_num_events)
-    """
-    attn = torch.matmul(audio_embs, score_embs.permute(0, 2, 1)) # (bsz, num_frames, max_num_events)
-    if x_attn_mask is not None:
-      attn = attn.masked_fill(x_attn_mask == 0, float('-inf'))
-    return torch.softmax(attn, dim=-1)
+    def __init__(self,
+                 vocab_size: int,
+                 d_score: int, n_heads_score: int,
+                 d_audio: int, n_heads_audio: int, 
+                 attn_dropout_score: float = 0.0,
+                 ffn_dropout_score: float = 0.5,
+                 n_layers_score: int = 5,
+                 attn_dropout_audio: float = 0.0,
+                 ffn_dropout_audio: float = 0.5,
+                 n_layers_audio: int = 5):
+        """
+        Args:
+            vocab_size (int): Size of the vocabulary for the score encoder.
+            d_score (int): Embedding dimension for the score encoder.
+            n_heads_score (int): Number of attention heads for the score encoder.
+            d_audio (int): Embedding dimension for the audio encoder.
+            n_heads_audio (int): Number of attention heads for the audio encoder.
+            attn_dropout_score (float, optional): Attention dropout probability
+                    for the score encoder. Defaults to 0.0.
+            ffn_dropout_score (float, optional): Feedforward network dropout
+                    probability for the score encoder. Defaults to 0.5.
+            n_layers_score (int, optional): Number of transformer blocks to stack
+                    for the score encoder. Defaults to 5.
+            attn_dropout_audio (float, optional): Attention dropout probability
+                    for the audio encoder. Defaults to 0.0.
+            ffn_dropout_audio (float, optional): Feedforward network dropout
+                    probability for the audio encoder. Defaults to 0.5.
+            n_layers_audio (int, optional): Number of transformer blocks to stack
+                    for the audio encoder. Defaults to 5.
+        """
+        super(AlignerModel, self).__init__()
+        self.score_encoder = ScoreEncoder(vocab_size, d_score, n_heads_score,
+                                          attn_dropout_score, ffn_dropout_score,
+                                          n_layers_score)
+        self.audio_encoder = AudioEncoder(d_audio, d_score, n_heads_audio,
+                                          attn_dropout_audio, ffn_dropout_audio,
+                                          n_layers_audio)
+        self.head = CrossAttentionHead(d_audio, d_score)
 
-class TheAligner(nn.Module):
-  def __init__(self, input_dim_audio, hid_dim_audio, vocab_size, hid_dim_score, n_heads_audio, n_heads_score,
-               dropout_audio=0.5, dropout_score=0.5, num_layers_audio=5, num_layers_score=5, device="cuda"):
-    super().__init__()
-    self.spectAligner = SpectrogramAlignerLayer(input_dim_audio, hid_dim_audio, n_heads_audio, dropout_audio, num_layers_audio, device)
-    self.scoreAligner = ScoreAlignerLayer(vocab_size, hid_dim_score, n_heads_score, dropout_score, num_layers_score, device)
-    self.proj = nn.Linear(hid_dim_score, hid_dim_audio).to(device)
-    self.cross = CrossAttnMatrix().to(device)
-    self.device = device
 
-  def forward(self, audio_embs, score_embs, score_mask, x_attn_mask, event_proj):
-    """
-      audio_embs: [bsz, num_frames, input_dim_audio]
-      score_embs: [bsz, score_len, vocab_size] (one hot)
-      score_mask: [bsz, score_len, score_len]
-      x_attn_mask: [bsz, max_num_events]
-      event_proj: [score_len, max_num_events]
-    """
-    score_embs = self.scoreAligner(score_embs, score_mask) # [bsz, score_len, hid_dim_score]
-    print("score_embs:", score_embs, score_embs.shape)
-    score_embs_events = torch.matmul(score_embs.permute(0, 2, 1), event_proj).permute(0, 2, 1).to(self.device) # [bsz, max_num_events, hid_dim_score]
-    print(score_embs_events, score_embs_events.shape)
-    score_embs = self.proj(score_embs_events) # [bsz, max_num_events, hid_dim_audio]
-    spect_embs = self.spectAligner(audio_embs, score_embs, x_attn_mask) # [bsz, num_frames, hid_dim_audio] 
-    # print("spect_embs", spect_embs, spect_embs.shape)
-    # print("score_embs", score_embs, score_embs.shape)
-    output = self.cross(audio_embs, score_embs, x_attn_mask) # [bsz, num_frames, max_num_events]
-    return output
+    @staticmethod
+    def _proj_score_to_event(score_embed: Tensor,
+                             event_padding_mask: BoolTensor
+                             ) -> Tensor:
+        with torch.no_grad():
+            num_ones = event_padding_mask.sum(dim=1)
+            max_ones = num_ones.max()
+            score_to_event = torch.zeros(event_padding_mask.size(0),
+                                        max_ones.item(),
+                                        event_padding_mask.size(1),
+                                        dtype=torch.bool)
+            for i in range(event_padding_mask.size(0)):
+                indices = torch.where(event_padding_mask[i])[0]
+                score_to_event[i, torch.arange(num_ones[i].item()), indices] = True
+
+        event_embed = score_to_event.float() @ score_embed
+        return event_embed
+
+
+    def forward(self,
+                audio_frames: Tensor,
+                score_ids: LongTensor,
+                score_attn_mask: BoolTensor,
+                event_padding_mask: BoolTensor,
+                ) -> Tensor:
+        """
+        Args:
+            audio_frames (Tensor): Mel spectrogram frames.
+                    Size: (batch_size, n_frames, d_audio).
+            score_ids (LongTensor): Integer input ids for the score encoder.
+                    Size: (batch_size, max_n_tokens, d_score)
+            score_attn_mask (BoolTensor): Boolean self-attention mask for the
+                    score encoder. Size: (batch_size, max_n_tokens, max_n_tokens).
+            event_padding_mask (BoolTensor): Boolean tensor that specifies
+                    where in the score tokens (`score_ids`) the event markers occur.
+                    Size: (batch_size, max_n_tokens).
+
+        Returns:
+            Tensor: Alignment matrix.
+                    Size: (batch_size, n_frames, max_n_events)
+        """
+        score_embed: Tensor = self.score_encoder(score_ids, score_attn_mask)
+        event_embed = AlignerModel._proj_score_to_event(score_embed,
+                                                        event_padding_mask)
+        audio_embed: Tensor = self.audio_encoder(audio_frames,
+                                                 event_embed,
+                                                 event_padding_mask)
+        out = self.head(audio_embed, event_embed, event_padding_mask)
+        return out
