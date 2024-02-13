@@ -168,48 +168,36 @@ def binary_accuracy_vec(
         return mean_acc_per_sample
 
 
-def monotonicity(
-        Y_pred: torch.Tensor, 
-        midi_event_timestamps: torch.Tensor
-    ) -> bool:
+def monotonicity(Y_pred: torch.Tensor) -> bool:
     """Compute the monotonicity of the predicted alignment matrix.
 
     Args:
         Y_pred (torch.Tensor): Predicted binary alignment matrix of shape (E, X), where E is the number of MIDI events in the score and X is the number of audio frames.
-        midi_event_timestamps (torch.Tensor): Timestamps of MIDI events of shape (E,).
 
     Returns:
         float: Whether or not the predicted alignment adheres to monotonicity.
     """
 
     pred_indices = torch.argmax(Y_pred, dim=0)
-    pred_timestamps = midi_event_timestamps[pred_indices]
-    return torch.all(pred_timestamps[1:] >= pred_timestamps[:-1]).float()
+    return torch.all(pred_indices[1:] >= pred_indices[:-1]).float()
 
 
 def monotonicity_vec(
         Y_pred: torch.Tensor, 
-        midi_event_timestamps: torch.Tensor,
         reduction: str = 'none'
     ) -> float:
     """Compute the monotonicity of the predicted alignment matrices.
 
     Args:
         Y_pred (torch.Tensor): Predicted binary alignment matrix of shape (N, E, X), N is the batch size, E is the number of MIDI events in the score, and X is the number of audio frames.
-        midi_event_timestamps (torch.Tensor): Timestamps of MIDI events of shape (E,).
         reduction (str): Reduction method for the monotonicity. Either \textbf{mean} or \textbf{none}.
 
     Returns:
         float or torch.Tensor: Whether or not the predicted alignment adheres to monotonicity across the batch."""
     pred_indices = torch.argmax(Y_pred, dim=1)
 
-    # Expand midi_event_timestamps to match the batch size
-    expanded_timestamps = midi_event_timestamps.unsqueeze(0).expand(Y_pred.shape[0], -1)
-
-    pred_timestamps = torch.gather(expanded_timestamps, 1, pred_indices)
-
     # Check if timestamps are monotonically non-decreasing along each frame
-    diffs = pred_timestamps[:, 1:] - pred_timestamps[:, :-1]
+    diffs = pred_indices[:, 1:] - pred_indices[:, :-1]
     monotonicity_per_sample = torch.all(diffs >= 0, dim=1).float()
 
     if reduction == 'mean':
