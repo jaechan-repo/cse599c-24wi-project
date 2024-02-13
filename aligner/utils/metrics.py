@@ -184,14 +184,12 @@ def monotonicity(Y_pred: torch.Tensor) -> bool:
 
 def monotonicity_vec(
         Y_pred: torch.Tensor, 
-        midi_event_timestamps: torch.Tensor,
         reduction: str = 'none'
     ) -> float:
     """Compute the monotonicity of the predicted alignment matrices.
 
     Args:
         Y_pred (torch.Tensor): Predicted binary alignment matrix of shape (N, E, X), N is the batch size, E is the number of MIDI events in the score, and X is the number of audio frames.
-        midi_event_timestamps (torch.Tensor): Timestamps of MIDI events of shape (E,).
         reduction (str): Reduction method for the monotonicity. Either \textbf{mean} or \textbf{none}.
 
     Returns:
