@@ -1,6 +1,9 @@
 venv
 *.ipynb
-data/*
 
+data/*
 !data/*.py
+
 **/__pycache__/
+wandb
+ckpt/*
