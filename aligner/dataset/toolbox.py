@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from torch import Tensor, LongTensor
+from torch import Tensor, LongTensor, BoolTensor
 import torchaudio
 from typing import List, Optional, Tuple, NamedTuple
 from ..utils.constants import *
@@ -25,7 +25,8 @@ def t2fi(timestamp: float) -> int:
 
 
 def sample_interval(imin: int, imax: int,
-                    jmin: int, jmax: int) -> Tuple[int, int]:
+                    jmin: int, jmax: int, 
+                    ) -> Tuple[int, int]:
     assert imin <= imax < jmin <= jmax
     i = randrange(imin, imax+1)
     j = randrange(jmin, jmax+1)
@@ -210,37 +211,37 @@ class ParsedMIDI:
 
         # Encoding
         score_ids = [TOKEN_ID['[BOS]']]     # BOS
-        event_idxes = [0]                   # BOS
+        event_pos = [0]                   # BOS
 
         for _, row in self.midi.iterrows():
-            event_idxes.append(len(score_ids))
+            event_pos.append(len(score_ids))
             score_ids.append(TOKEN_ID['[event]'])
             score_ids += row['pitch']
 
         n_tokens = len(score_ids)
-        self.score_ids = torch.tensor(score_ids, dtype=torch.int64)
-        self.event_idxes = torch.tensor(event_idxes, dtype=torch.int64)
-        assert self.event_idxes.shape == (n_events,)
+        self.score_ids: LongTensor = torch.tensor(score_ids, dtype=torch.int64)
+        self.event_pos: LongTensor = torch.tensor(event_pos, dtype=torch.int64)
+        assert self.event_pos.shape == (n_events,)
         
         # Local self-attention mask
         local_event_score_attn_mask = torch.zeros((n_tokens, n_tokens),
                                                   dtype=torch.int64)
-        for i, start in enumerate(self.event_idxes):
-            end = n_tokens if i == n_events - 1 else self.event_idxes[i+1]
+        for i, start in enumerate(self.event_pos):
+            end = n_tokens if i == n_events - 1 else self.event_pos[i+1]
             local_event_score_attn_mask[start:end, start:end] = 1
 
-        # Event mask
-        self.event_padding_mask = torch.zeros((n_tokens,), dtype=torch.int64)
-        self.event_padding_mask[self.event_idxes] = 1
-
         # Global self-attention mask
-        global_event_score_attn_mask = torch.outer(self.event_padding_mask,
-                                                   self.event_padding_mask)
+        event_mask = torch.zeros((n_tokens,), dtype=torch.int64)
+        global_event_score_attn_mask = torch.outer(event_mask, event_mask)
 
         # Aggregate the two attention masks
         self.score_attn_mask = (local_event_score_attn_mask + global_event_score_attn_mask).clamp(max=1)
         assert self.score_attn_mask.shape == (n_tokens, n_tokens)
-        
+
+        # Project score to event
+        self.score_to_event = F.one_hot(self.event_pos, num_classes=n_tokens).bool()
+        assert self.score_to_event.shape == (n_events, n_tokens)
+
         # Size variables
         self.n_frames, self.n_events, self.n_tokens = n_frames, n_events, n_tokens
 
@@ -268,36 +269,63 @@ class ParsedMIDI:
         assert afi2 <= self.n_frames, \
             "Audio frame indices cannot exceed the total number of frames."
 
+        assert afi2 - afi1 == N_FRAMES_PER_CLIP
+
         aei1 = self.fi2ei[afi1]
         aei2 = self.fi2ei[afi2] if afi2 < self.n_frames else self.n_events
         assert ei1 <= aei1 < aei2 <= ei2, "Audio has to occur within the events."
 
         Y = self.alignment_matrix[afi1:afi2, ei1:ei2]
+
         return Y
 
 
     class Encoding(NamedTuple):
         score_ids: LongTensor
-        event_padding_mask: LongTensor
-        score_attn_mask: LongTensor
+        score_attn_mask: BoolTensor
+        score_to_event: BoolTensor
+        event_pos: LongTensor
+
+
+    def ei2toki(self, ei: int):
+        assert 0 <= ei <= self.n_events, "Invalid event index"
+        toki = self.event_pos[ei] if ei < self.n_events else self.n_tokens
+        return toki
 
 
     def encode(self,
                ei1: int, ei2: int,
                return_tuple: bool = True
                ) -> Encoding | LongTensor:
-        
         assert ei1 < ei2, "ei1 has to be less than ei2."
-        assert 0 <= ei1 < ei2 <= self.n_events, "Invalid event indicies."
 
-        toki1 = self.event_idxes[ei1]
-        toki2 = self.event_idxes[ei2] if ei2 < self.n_events else self.n_tokens
+        toki1, toki2 = self.ei2toki(ei1), self.ei2toki(ei2)
 
         if return_tuple:
             return ParsedMIDI.Encoding(
                 score_ids=self.score_ids[toki1:toki2],
-                event_padding_mask=self.event_padding_mask[toki1:toki2],
-                score_attn_mask=self.score_attn_mask[toki1:toki2, toki1:toki2]
-            )
+                score_attn_mask=self.score_attn_mask[toki1:toki2, toki1:toki2],
+                score_to_event=self.score_to_event[ei1:ei2, toki1:toki2],
+                event_pos=self.event_pos[ei1:ei2])
 
         return self.score_ids[toki1:toki2]
+
+
+    def find_maximal_event_indices(self,
+                                   ei1: int, ei2: int,
+                                   max_n_tokens: int
+                                   ) -> Tuple[int, int]:
+        assert ei1 < ei2, "ei2 must be larger than ei1"
+        assert self.ei2toki(ei2) - self.ei2toki(ei1) <= max_n_tokens, \
+                "provided [ei1, ei2) already covers max_n_tokens."
+
+        min_ei1 = ei1
+        max_ei2 = ei2
+        
+        while min_ei1 > 0 and self.ei2toki(max_ei2) - self.ei2toki(min_ei1 - 1) <= max_n_tokens:
+            min_ei1 -= 1
+        
+        while max_ei2 < self.n_events and self.ei2toki(max_ei2 + 1) - self.ei2toki(min_ei1) <= max_n_tokens:
+            max_ei2 += 1
+        
+        return min_ei1, max_ei2
