@@ -58,14 +58,14 @@ def evaluate(
 
     # Compute loss and metrics for each batch with tqdm
     for batch in tqdm(dataloader):
-        Y = batch.Y_b.transpose(-2, -1) # (N, X, E) -> (N, E, X)
+        Y = batch.Y.transpose(-2, -1) # (N, X, E) -> (N, E, X)
 
         # get model predictions given audio frames and score events
         Y_pred = model(
-            batch.audio_frames_b,
-            score_ids=batch.score_ids_b,
-            score_attn_mask=batch.score_attn_mask_b,
-            event_padding_mask=batch.event_padding_mask_b
+            batch.audio_frames,
+            score_ids=batch.score_ids,
+            score_attn_mask=batch.score_attn_mask,
+            event_padding_mask=batch.event_padding_mask
         ).tranpose(-2, -1) # (N, X, E) -> (N, E, X)
 
         total_loss += compute_loss(Y_pred, batch.Y, midi_event_timestamps, 'mean')
@@ -75,7 +75,7 @@ def evaluate(
 
         total_distance += temporal_distance_vec(Y_pred_binary, Y, midi_event_timestamps, tolerance, 'mean')
         total_accuracy += binary_accuracy_vec(Y_pred_binary, Y, midi_event_timestamps, tolerance, 'mean')
-        total_monotonicity += monotonicity_vec(Y_pred_binary, midi_event_timestamps, 'mean')
+        total_monotonicity += monotonicity_vec(Y_pred_binary, 'mean')
         total_coverage += score_coverage_vec(Y_pred_binary, 'mean')
 
     return total_loss / len(dataloader), total_distance / len(dataloader), total_accuracy / len(dataloader), total_monotonicity / len(dataloader), total_coverage / len(dataloader)
