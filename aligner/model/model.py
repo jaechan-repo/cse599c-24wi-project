@@ -31,29 +31,29 @@ class ScoreEncoderBlock(nn.Module):
                  ffn_expansion: int = 4):
         super(ScoreEncoderBlock, self).__init__()
 
-        self.self_attn = MultiheadALiBiSelfAttention(d_embed, n_heads, attn_dropout)
+        self.SelfAttn = MultiheadALiBiSelfAttention(d_embed, n_heads, attn_dropout)
 
-        self.norm1 = nn.LayerNorm(d_embed)
-        self.norm2 = nn.LayerNorm(d_embed)
+        self.Norm1 = nn.LayerNorm(d_embed)
+        self.Norm2 = nn.LayerNorm(d_embed)
 
-        self.ffn = nn.Sequential(
+        self.FFN = nn.Sequential(
             nn.Linear(d_embed, ffn_expansion * d_embed),
             nn.ReLU(),
             nn.Linear(ffn_expansion * d_embed, d_embed),
         )
 
-        self.dropout = nn.Dropout(ffn_dropout)
+        self.Dropout = nn.Dropout(ffn_dropout)
 
 
     def forward(self,
                 embed: Tensor,
                 attn_mask: Optional[Tensor] = None
                 ) -> Tensor:
-        out1 = self.self_attn(embed, attn_mask)
-        out1 = self.dropout(self.norm1(out1 + embed))
+        out1 = self.SelfAttn(embed, attn_mask)
+        out1 = self.Dropout(self.Norm1(out1 + embed))
 
-        out: Tensor = self.ffn(out1)
-        out = self.dropout(self.norm2(out + out1))
+        out: Tensor = self.FFN(out1)
+        out = self.Dropout(self.Norm2(out + out1))
 
         assert not out.isnan().any()
         return out
@@ -70,10 +70,10 @@ class ScoreEncoder(nn.Module):
                  ffn_expansion: int = 4,
                  n_layers: int = 5):
         super(ScoreEncoder, self).__init__()
-        self.lookup_embed = nn.Embedding(vocab_size, d_score,
+        self.Lookup = nn.Embedding(vocab_size, d_score,
                                          padding_idx=TOKEN_ID['[PAD]'])
 
-        self.encoder_blocks = nn.ModuleList([
+        self.EncoderBlocks = nn.ModuleList([
             ScoreEncoderBlock(
                 d_score, n_heads, attn_dropout, ffn_dropout, ffn_expansion
             ) for _ in range(n_layers)
@@ -84,9 +84,9 @@ class ScoreEncoder(nn.Module):
                 input_ids: LongTensor,
                 attn_mask: Optional[BoolTensor] = None
                 ) -> Tensor:
-        out: Tensor = self.lookup_embed(input_ids)
-        for block in self.encoder_blocks:
-            out = block(out, attn_mask)
+        out: Tensor = self.Lookup(input_ids)
+        for Block in self.EncoderBlocks:
+            out = Block(out, attn_mask)
 
         assert not out.isnan().any()
         return out
@@ -103,19 +103,19 @@ class AudioEncoderBlock(nn.Module):
                  ffn_expansion: int = 4):
         super(AudioEncoderBlock, self).__init__()
 
-        self.self_attn = MultiheadALiBiSelfAttention(d_audio, n_heads, attn_dropout)
-        self.xattn = MultiheadAttention(d_audio, d_score, n_heads,
+        self.SelfAttn = MultiheadALiBiSelfAttention(d_audio, n_heads, attn_dropout)
+        self.XAttn = MultiheadAttention(d_audio, d_score, n_heads,
                                         dropout=attn_dropout)
 
-        self.norm1 = nn.LayerNorm(d_audio)
-        self.norm2 = nn.LayerNorm(d_audio)
-        self.norm3 = nn.LayerNorm(d_audio)
-        self.ffn = nn.Sequential(
+        self.Norm1 = nn.LayerNorm(d_audio)
+        self.Norm2 = nn.LayerNorm(d_audio)
+        self.Norm3 = nn.LayerNorm(d_audio)
+        self.FFN = nn.Sequential(
             nn.Linear(d_audio, ffn_expansion * d_audio),
             nn.ReLU(),
             nn.Linear(ffn_expansion * d_audio, d_audio),
         )
-        self.dropout = nn.Dropout(ffn_dropout)
+        self.Dropout = nn.Dropout(ffn_dropout)
 
 
     def forward(self, 
@@ -124,18 +124,18 @@ class AudioEncoderBlock(nn.Module):
                 event_padding_mask: Optional[BoolTensor] = None):
 
         ### Step 1: Self-attention ###
-        out1 = self.self_attn(audio_embed)
-        out1 = self.dropout(self.norm1(out1 + audio_embed)) # residual
+        out1 = self.SelfAttn(audio_embed)
+        out1 = self.Dropout(self.Norm1(out1 + audio_embed)) # residual
         
         ### Step 2: Cross-attention ###
         _, n_frames, _ = audio_embed.shape
         attn_mask = event_padding_mask.unsqueeze(1).repeat(1, n_frames, 1)
-        out2 = self.xattn(audio_embed, event_embed, attn_mask)
-        out2 = self.dropout(self.norm2(out2 + out1))
+        out2 = self.XAttn(audio_embed, event_embed, attn_mask)
+        out2 = self.Dropout(self.Norm2(out2 + out1))
 
         ### Step 3: Feedforward network ###
-        out = self.ffn(out2)
-        out = self.dropout(self.norm3(out + out2))
+        out = self.FFN(out2)
+        out = self.Dropout(self.Norm3(out + out2))
 
         assert not out.isnan().any()
         return out
@@ -153,7 +153,7 @@ class AudioEncoder(nn.Module):
                  n_layers: int = 5):
         super(AudioEncoder, self).__init__()
 
-        self.encoder_blocks = nn.ModuleList([AudioEncoderBlock(
+        self.EncoderBlocks = nn.ModuleList([AudioEncoderBlock(
             d_audio, d_score, n_heads,
             attn_dropout, ffn_dropout, ffn_expansion
         ) for _ in range(n_layers)])
@@ -165,8 +165,8 @@ class AudioEncoder(nn.Module):
                 event_padding_mask: Optional[BoolTensor] = None
                 ) -> Tensor:
         out = audio_frames
-        for block in self.encoder_blocks:
-            out = block(out, event_embed, event_padding_mask)
+        for Block in self.EncoderBlocks:
+            out = Block(out, event_embed, event_padding_mask)
 
         assert not out.isnan().any()
         return out
@@ -179,8 +179,8 @@ class CrossAttentionHead(nn.Module):
 
     def __init__(self, d_audio: int, d_score: int, bias=True):
         super().__init__()
-        self.fc_q = nn.Linear(d_audio, d_audio, bias=bias)  # projects into d_score
-        self.fc_k = nn.Linear(d_score, d_audio, bias=bias)
+        self.Linear_Q = nn.Linear(d_audio, d_audio, bias=bias)  # projects into d_score
+        self.Linear_K = nn.Linear(d_score, d_audio, bias=bias)
         self.scale = 1 / math.sqrt(d_audio)
 
 
@@ -190,11 +190,10 @@ class CrossAttentionHead(nn.Module):
                 event_padding_mask: Optional[BoolTensor] = None
                 ) -> Tensor:
 
-        batch_size, n_frames, _ = audio_embed.shape
-        _, max_n_events, _ = event_embed.shape
+        _, n_frames, _ = audio_embed.shape
 
-        Q: Tensor = self.fc_q(audio_embed)
-        K: Tensor = self.fc_k(event_embed)
+        Q: Tensor = self.Linear_Q(audio_embed)
+        K: Tensor = self.Linear_K(event_embed)
         attn = Q @ K.transpose(1, 2) * self.scale
         # assert attn.shape == (batch_size, n_frames, max_n_events)
 
@@ -242,13 +241,18 @@ class AlignerModel(nn.Module):
                     for the audio encoder. Defaults to 5.
         """
         super(AlignerModel, self).__init__()
-        self.score_encoder = ScoreEncoder(vocab_size, d_score, n_heads_score,
+        self.ScoreEncoder = ScoreEncoder(vocab_size, d_score, n_heads_score,
                                           attn_dropout_score, ffn_dropout_score,
                                           n_layers_score)
-        self.audio_encoder = AudioEncoder(d_audio, d_score, n_heads_audio,
+        self.AudioEncoder = AudioEncoder(d_audio, d_score, n_heads_audio,
                                           attn_dropout_audio, ffn_dropout_audio,
                                           n_layers_audio)
-        self.head = CrossAttentionHead(d_audio, d_score)
+        self.Head = CrossAttentionHead(d_audio, d_score)
+
+
+    @classmethod
+    def from_config(cls, config: ModelConfig):
+        return cls(**config._asdict())
 
 
     def forward(self,
@@ -273,12 +277,12 @@ class AlignerModel(nn.Module):
             Tensor: Alignment matrix.
                     Size: (batch_size, n_frames, max_n_events)
         """
-        score_embed: Tensor = self.score_encoder(score_ids, score_attn_mask)
+        score_embed: Tensor = self.ScoreEncoder(score_ids, score_attn_mask)
         event_embed = score_to_event.float() @ score_embed
-        audio_embed: Tensor = self.audio_encoder(audio_frames,
+        audio_embed: Tensor = self.AudioEncoder(audio_frames,
                                                  event_embed,
                                                  event_padding_mask)
-        out = self.head(audio_embed, event_embed, event_padding_mask)
+        out = self.Head(audio_embed, event_embed, event_padding_mask)
 
         assert not out.isnan().any()
         return out

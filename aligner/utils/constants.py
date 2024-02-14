@@ -11,13 +11,14 @@ N_FRAMES_PER_STRIDE = N_FRAMES_PER_CLIP // 2
 
 ### Time - MIDI ###
 EVENT_RESOLUTION = AUDIO_RESOLUTION      # 10 ms
-MAX_N_TOKENS = 8192
+MAX_N_TOKENS = 2048
 
 ### Frequency ###
-N_MELS = 256
-MEL_LO_HZ = 20.0
-MEL_FMIN = 20.0
-MEL_FMAX = 7600.0
+N_MELS = 128
+F_MIN = 20.0
+F_MAX = 5000.0   
+# TODO: For piano music, highest frequency is 4186Hz
+# Prone to change for v1.
 
 ### Token id ###
 N_PITCHES = 128

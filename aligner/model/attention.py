@@ -6,6 +6,9 @@ from ..utils.constants import *
 import math
 
 
+NEG_INF = -1e9
+
+
 class MultiheadAttention(nn.Module):
     
     def __init__(self,
@@ -23,14 +26,14 @@ class MultiheadAttention(nn.Module):
         self.d_embed, self.d_k = d_embed, d_k
         self.n_heads = n_heads
         self.d_h = d_embed // n_heads
-        self.dropout = nn.Dropout(dropout)
 
-        self.fc_q = nn.Linear(d_embed, d_embed, bias=bias)
-        self.fc_k = nn.Linear(d_k, d_embed, bias=bias)
-        self.fc_v = nn.Linear(d_k, d_embed, bias=bias)
-        self.fc_o = nn.Linear(d_embed, d_embed, bias=bias)
+        self.Dropout = nn.Dropout(dropout)
+        self.Linear_Q = nn.Linear(d_embed, d_embed, bias=bias)
+        self.Linear_K = nn.Linear(d_k, d_embed, bias=bias)
+        self.Linear_V = nn.Linear(d_k, d_embed, bias=bias)
+        self.Linear_O = nn.Linear(d_embed, d_embed, bias=bias)
+
         self.scale = 1 / math.sqrt(self.d_embed)
-
         self.pos_encoding = pos_encoding
 
 
@@ -46,7 +49,7 @@ class MultiheadAttention(nn.Module):
         _, len_k, d_k = key.shape
         # assert d_k == self.d_k
 
-        Q, K, V = self.fc_q(embed), self.fc_k(key), self.fc_v(key)
+        Q, K, V = self.Linear_Q(embed), self.Linear_K(key), self.Linear_V(key)
         Q_h = Q.view(bsz, len_q, self.n_heads, self.d_h).permute(0, 2, 1, 3)
         K_h = K.view(bsz, len_k, self.n_heads, self.d_h).permute(0, 2, 1, 3)
         V_h = V.view(bsz, len_k, self.n_heads, self.d_h).permute(0, 2, 1, 3)
@@ -66,16 +69,16 @@ class MultiheadAttention(nn.Module):
 
         if attn_mask is not None:
             attn_mask = attn_mask.float().unsqueeze(1)
-            attn = attn.masked_fill(attn_mask == 0, -1e9)
+            attn = attn.masked_fill(attn_mask == 0, NEG_INF)
 
-        attn = self.dropout(torch.softmax(attn, dim=-1))
+        attn = self.Dropout(torch.softmax(attn, dim=-1))
 
         out = attn @ V_h
         # assert out.shape == (bsz, self.n_heads, len_q, self.d_h)
 
         out = out.permute(0, 2, 1, 3).contiguous()
         out = out.view(bsz, len_q, d_embed)
-        out = self.fc_o(out)
+        out = self.Linear_O(out)
 
         assert not out.isnan().any()
         return out
@@ -88,7 +91,7 @@ class MultiheadALiBiSelfAttention(nn.Module):
                  n_heads: int,
                  dropout: float = 0.0):
         super(MultiheadALiBiSelfAttention, self).__init__()
-        self.attn = MultiheadAttention(d_embed,
+        self.Attn = MultiheadAttention(d_embed,
                                        d_embed,
                                        n_heads,
                                        dropout=dropout,
@@ -98,6 +101,6 @@ class MultiheadALiBiSelfAttention(nn.Module):
                 embed: Tensor,
                 attn_mask: Optional[Tensor] = None
                 ) -> Tensor:
-        out = self.attn(embed, embed, attn_mask)
+        out = self.Attn(embed, embed, attn_mask)
         assert not out.isnan().any()
         return out
