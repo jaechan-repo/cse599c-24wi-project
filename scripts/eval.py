@@ -30,10 +30,10 @@ def load_model(model_path):
 
 
 def evaluate(
-        model, 
-        dataloader: torch.utils.data.DataLoader, 
-        decoding: Callable[[torch.Tensor], torch.Tensor], 
-        tolerance: float) -> Tuple[float, float, float, float, float]:
+    model: AlignerModel, 
+    dataloader: torch.utils.data.DataLoader, 
+    decoding: Callable[[torch.Tensor], torch.Tensor], 
+    tolerance: float) -> Dict[str, float]:
     
     """Evaluate the model on the evaluation dataset.
     
@@ -44,11 +44,7 @@ def evaluate(
         tolerance (float): Tolerance threshold for alignment distance.
         
     Returns:
-        float: Average loss on the evaluation dataset.
-        float: Average temporal alignment distance on the evaluation dataset.
-        float: Average binary alignment accuracy on the evaluation dataset.
-        float: Average monotonicity on the evaluation dataset.
-        float: Average score coverage on the evaluation dataset."""
+        Dict[str, float]: Dictionary of evaluation metrics for 'Loss', 'Distance', 'Accuracy', 'Monotonicity', 'Coverage'."""
 
     total_loss = 0
     total_distance = 0
@@ -57,38 +53,49 @@ def evaluate(
     total_monotonicity = 0
 
     # Compute loss and metrics with batch size of 1
-    for batch in tqdm(dataloader):
-        Y = batch.Y.squeeze(0).transpose(-2, -1) # (N, X, E) -> (N, E, X)
+    for item in tqdm(dataloader):
+
+        Y = item.Y.transpose(-2, -1) # (X, E) -> (E, X)
+        score_event_timestamps = item.score_event_timestamps     
+
+        # unsqueeze batch dimension to match model forward input shape
+        audio_frames = item.audio_frames.unsqueeze(0)
+        score_ids = item.score_ids.unsqueeze(0)
+        score_attn_mask = item.score_attn_mask.unsqueeze(0)
 
         # get model predictions given audio frames and score events
         Y_pred = model(
-            batch.audio_frames,
-            score_ids=batch.score_ids,
-            score_attn_mask=batch.score_attn_mask,
-            event_padding_mask=batch.event_padding_mask
-        ).squeeze(0).tranpose(-2, -1) # (N, X, E) -> (N, E, X)
+            audio_frames,
+            score_ids=score_ids,
+            score_attn_mask=score_attn_mask,
+        ).transpose(-2, -1) # (X, E) -> (E, X)
 
-        total_loss += compute_loss(Y_pred, batch.Y, midi_event_timestamps, 'mean')
+        total_loss += compute_loss(Y_pred, Y, score_event_timestamps)
 
         # decode soft cross-attn alignment matrix into binary alignment matrix
         Y_pred_binary = decoding(Y_pred)
 
-        total_distance += temporal_distance(Y_pred_binary, Y, midi_event_timestamps, tolerance)
-        total_accuracy += binary_accuracy(Y_pred_binary, Y, midi_event_timestamps, tolerance)
+        total_distance += temporal_distance(Y_pred_binary, Y, score_event_timestamps, tolerance)
+        total_accuracy += binary_accuracy(Y_pred_binary, Y, score_event_timestamps, tolerance)
         total_monotonicity += monotonicity(Y_pred_binary)
         total_coverage += score_coverage(Y_pred_binary)
 
-    return total_loss / len(dataloader), total_distance / len(dataloader), total_accuracy / len(dataloader), total_monotonicity / len(dataloader), total_coverage / len(dataloader)
+
+    # organize metrics into a dictionary
+    metrics = {
+        'Loss': total_loss / len(dataloader),
+        'Distance': total_distance / len(dataloader),
+        'Accuracy': total_accuracy / len(dataloader),
+        'Monotonicity': total_monotonicity / len(dataloader),
+        'Coverage': total_coverage / len(dataloader)
+    }
+
+    return metrics
 
 
 def main():
     # Parse arguments: model_path, evaluation_data_path, tau
-    parser = argparse.ArgumentParser(description='Evaluation script')
-    parser.add_argument('model_path', type=str, help='Path to the trained model')
-    parser.add_argument('evaluation_data_path', type=str, help='Path to the evaluation data')
-    parser.add_argument('decoding', type=str, choices=['max', 'dtw'], help='Decoding method to use on cross-attention alignment matrix')
-    parser.add_argument('tolerance', type=float, help='Tolerance threshold for alignment distance. Minimum threshold is the MIDI score event duration / 2')
-    args = parser.parse_args()
+    args = get_args()
 
     model_path = args.model_path
     evaluation_data_path = args.evaluation_data_path
@@ -99,28 +106,27 @@ def main():
     evaluation_dataset = MaestroDataset(evaluation_data_path, 'test')
     dataloader = DataLoader(
         dataset=evaluation_dataset,
-        batch_size=1,
         num_workers=4,
-        collate_fn=MaestroDataset.collate_fn
     )
     
-    loss, distance, accuracy, monotonicity, coverage = evaluate(model, dataloader, decoding, tolerance)
-    print(f'Evaluation Metrics with Tau={tolerance}\nLoss: {loss:.2f}, Distance: {distance:.2f}, Accuracy: {accuracy:.2f}, Monotonicity: {monotonicity:.2f}, Coverage: {coverage:.2f}')
-
-    # organize metrics into a dictionary
-    metrics = {
-        'Loss': loss,
-        'Distance': distance,
-        'Accuracy': accuracy,
-        'Monotonicity': monotonicity,
-        'Coverage': coverage
-    }
+    metrics = evaluate(model, dataloader, decoding, tolerance)
+    
+    print(f'Evaluation Metrics with Tau={tolerance}\nLoss: {metrics['Loss']:.2f}, Distance: {metrics['Distance']:.2f}, Accuracy: {metrics['Accuracy']:.2f}, Monotonicity: {metrics['Monotonicity']:.2f}, Coverage: {metrics['Coverage']:.2f}')
 
     metrics_json = json.dumps(metrics)
     
     # write the JSON string to a file
     with open('metrics.json', 'w') as f:
         f.write(metrics_json)
+
+def get_args():
+    parser = argparse.ArgumentParser(description='Evaluation script')
+    parser.add_argument('model_path', type=str, help='Path to the trained model')
+    parser.add_argument('evaluation_data_path', type=str, help='Path to the evaluation data')
+    parser.add_argument('decoding', type=str, choices=['max', 'dtw'], help='Decoding method to use on cross-attention alignment matrix')
+    parser.add_argument('tolerance', type=float, help='Tolerance threshold for alignment distance. Minimum threshold is the MIDI score event duration / 2')
+    args = parser.parse_args()
+    return args
 
 
 if __name__ == "__main__":
