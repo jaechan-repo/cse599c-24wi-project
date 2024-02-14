@@ -12,7 +12,7 @@ from .toolbox import ParsedMIDI, load_spectrogram, unfold_spectrogram, sample_in
 import pandas as pd
 from pandas import DataFrame
 import random
-
+from memory_profiler import profile
 
 
 class MaestroDataset(IterableDataset):
@@ -111,30 +111,27 @@ class MaestroDataset(IterableDataset):
 
         for id_, audio_uri, midi_uri in zip(self.ids, self.audio_uris, self.midi_uris):
 
-            signal = load_spectrogram(audio_uri)
-
-            signal_clips = unfold_spectrogram(signal)
-            n_frames_padded = N_FRAMES_PER_STRIDE * (len(signal_clips)-1) \
-                            + N_FRAMES_PER_CLIP
-
-            idxed_signal_clips = [(ci, signal_clip) \
-                                  for ci, signal_clip in enumerate(signal_clips)]
+            audio = load_spectrogram(audio_uri)
+            audio_clips: List[Tuple[int, Tensor]] = list(enumerate(unfold_spectrogram(audio)))
+            n_frames = N_FRAMES_PER_STRIDE * (len(audio_clips)-1) \
+                     + N_FRAMES_PER_CLIP
 
             if self.randomized:
-                random.shuffle(idxed_signal_clips)
+                random.shuffle(audio_clips)
 
-            midi = ParsedMIDI(midi_uri, n_frames_padded)
+            midi = ParsedMIDI(midi_uri)
 
-            for ci, signal_clip in idxed_signal_clips:
-                assert len(signal_clip) == N_FRAMES_PER_CLIP
+            for ci, audio_clip in audio_clips:
+                assert len(audio_clip) == N_FRAMES_PER_CLIP
 
                 # Audio frame interval.
+                # Inclusive on the left, exclusive on the right.
                 afi1 = ci * N_FRAMES_PER_STRIDE
                 afi2 = afi1 + N_FRAMES_PER_CLIP
 
                 # Event interval corresponding to [afi1, afi2). This is the most MINIMAL 
                 # interval of events that covers the span of music from afi1 and afi2.
-                ei1, ei2 = midi.fi2ei[afi1], midi.fi2ei[afi2-1]+1
+                ei1, ei2 = midi.find_minimal_event_interval_covering(afi1, afi2)
                 n_tokens = midi.ei2toki(ei2) - midi.ei2toki(ei1)
 
                 # Search for a larger event interval if this minimal event interval
@@ -142,36 +139,33 @@ class MaestroDataset(IterableDataset):
                 if n_tokens <= MAX_N_TOKENS:
                     # [min_ei1, max_ei2) is the MAXIMAL event interval such that
                     # the interval length doesn't exceed MAX_N_TOKENS.
-                    min_ei1, max_ei2 = midi.find_maximal_event_indices(ei1, ei2, MAX_N_TOKENS)
+                    min_ei1, max_ei2 = midi.find_maximal_event_interval_covering(ei1, ei2, MAX_N_TOKENS)
                     assert midi.ei2toki(max_ei2) - midi.ei2toki(min_ei1) <= MAX_N_TOKENS
 
                     if self.randomized:
                         # If train, randomly sample between the minimal and maximal interval.
                         ei1, ei2 = sample_interval(min_ei1, ei1, ei2, max_ei2)
                     else:
-                        # Otherwise, we take the maximal interval.
+                        # Otherwise, we take the minimal interval.
                         ei1, ei2 = min_ei1, max_ei2
+
 
                 encoding: ParsedMIDI.Encoding = midi.encode(ei1, ei2)
                 Y: Tensor = midi.align(afi1, afi2, ei1, ei2)
 
                 item = MaestroDataset.Item(id_=(id_, ci),
-                                           audio_frames=signal_clip,
+                                           audio_frames=audio_clip,
                                            Y=Y,
                                            **encoding._asdict())
 
                 if self.split == 'test':
-                    item = MaestroDataset.ItemWithMetadata(audio=signal,
+                    item = MaestroDataset.ItemWithMetadata(audio=audio,
                                                            midi=midi.midi,
                                                            audio_frame_interval=(afi1, afi2),
                                                            event_interval=(ei1, ei2),
                                                            **item._asdict())
                 yield item
 
-
-    def __len__(self): 
-        return len(self.ids)
-    
 
     def __iter__(self) -> Iterator[Item]:
         """Iterator for the MAESTRO dataset.
@@ -185,7 +179,6 @@ class MaestroDataset(IterableDataset):
             return self._preprocess()
 
 
-    @staticmethod
     def collate_fn(batch: List[Item]) -> Batch:
         batch_size = len(batch)
         id_= [item.id_ for item in batch]

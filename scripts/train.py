@@ -1,29 +1,95 @@
 import sys
 sys.path.append("..")
 
-from aligner.model import AlignerLitModel
+from aligner.model import AlignerLitModel, ModelConfig, LitModelConfig
 from aligner.utils import set_seed
 from aligner.utils.constants import *
-from aligner.utils.config import model_config, trainer_config
 
 import torch
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.callbacks import ModelCheckpoint
+
+import argparse
 import gc
+
+torch.cuda.empty_cache()
+gc.collect()
+
+
+model_config = ModelConfig(
+    ### SCORE ###
+    vocab_size=max(TOKEN_ID.values()) + 1,
+    d_score=64,
+    n_heads_score=4,
+    attn_dropout_score=0.0,
+    ffn_dropout_score=0.5,
+    n_layers_score=4,
+
+    ### AUDIO ###
+    d_audio=N_MELS,
+    n_heads_audio=8,
+    attn_dropout_audio=0.1,
+    ffn_dropout_audio=0.5,
+    n_layers_audio=4,
+)
 
 
 if __name__ == "__main__":
-    set_seed(42)
-    torch.cuda.empty_cache()
-    gc.collect()
+    """
+    Example run:
+    python train.py --save_to_path ../ckpt/v0/01 --save_every_epoch 1 -- batch_size 8
+    """
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--save_to_path', type=str, default=None,
+        help="Trainer saves checkpoint to this path. Defaults to current cwd."
+    )
+    parser.add_argument('--load_from_path', type=str, default=None,
+        help="Trainer loads checkpoint from this path. Defaults to not loading."
+    )
+    parser.add_argument('--save_every_step', type=int, default=None,
+        help="Trainer saves every given number of training steps."
+    )
+    parser.add_argument('--save_every_epoch', type=int, default=None,
+        help="Trainer saves every given number of epochs."
+    )
+    parser.add_argument('--accelerator', type=str, default='gpu')
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--batch_size', type=int, default=8)
+    args = parser.parse_args()
 
-    model = AlignerLitModel(trainer_config, model_config)
-    print(model)
+    if args.save_every_step is not None \
+            and args.save_every_epoch is not None:
+        ValueError("Specify only one of --save_every_step or --save_every_epoch.")
+
+    set_seed(args.seed)
+
+    lit_model_config = LitModelConfig(
+        data_dir="../data/maestro-v3.0.0",
+        batch_size=args.batch_size,
+        learning_rate=1e-4/16 * args.batch_size,
+        invalid_pred_penalty=1000,
+        num_dataloader_workers=0
+    )
+
+    model = AlignerLitModel(model_config, lit_model_config)
 
     wandb_logger = WandbLogger(project='score-align')
-    trainer = Trainer(accelerator=trainer_config.accelerator,
-                      devices='auto',
-                      logger=wandb_logger,
-                      check_val_every_n_epoch=trainer_config.checking_steps,
-                      max_steps=trainer_config.training_steps)
-    trainer.fit(model)
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=args.save_to_path,
+        filename='{epoch}-{step}-{val_loss:.2f}',
+        every_n_train_steps=args.save_every_step,
+        every_n_epochs=args.save_every_epoch
+    )
+
+    trainer = Trainer(
+        accelerator=args.accelerator,
+        max_epochs=-1,    # infinite
+        check_val_every_n_epoch=1,
+        logger=wandb_logger,
+        log_every_n_steps=50,
+        default_root_dir=args.save_to_path,
+        callbacks=[checkpoint_callback]
+    )
+
+    trainer.fit(model, ckpt_path=args.load_from_path)
