@@ -9,7 +9,7 @@ from typing import Literal, Tuple, Callable
 
 import sys
 sys.path.append('..')
-from aligner.utils.metrics import temporal_distance_vec, binary_accuracy_vec, monotonicity_vec, score_coverage_vec
+from aligner.utils.metrics import temporal_distance, binary_accuracy, monotonicity, score_coverage
 from aligner.utils.metrics import compute_loss
 from aligner.utils.decode import max_decode, DTW
 
@@ -56,9 +56,9 @@ def evaluate(
     total_coverage = 0
     total_monotonicity = 0
 
-    # Compute loss and metrics for each batch with tqdm
+    # Compute loss and metrics with batch size of 1
     for batch in tqdm(dataloader):
-        Y = batch.Y.transpose(-2, -1) # (N, X, E) -> (N, E, X)
+        Y = batch.Y.squeeze(0).transpose(-2, -1) # (N, X, E) -> (N, E, X)
 
         # get model predictions given audio frames and score events
         Y_pred = model(
@@ -66,20 +66,20 @@ def evaluate(
             score_ids=batch.score_ids,
             score_attn_mask=batch.score_attn_mask,
             event_padding_mask=batch.event_padding_mask
-        ).tranpose(-2, -1) # (N, X, E) -> (N, E, X)
+        ).squeeze(0).tranpose(-2, -1) # (N, X, E) -> (N, E, X)
 
         total_loss += compute_loss(Y_pred, batch.Y, midi_event_timestamps, 'mean')
 
         # decode soft cross-attn alignment matrix into binary alignment matrix
         Y_pred_binary = decoding(Y_pred)
 
-        total_distance += temporal_distance_vec(Y_pred_binary, Y, midi_event_timestamps, tolerance, 'mean')
-        total_accuracy += binary_accuracy_vec(Y_pred_binary, Y, midi_event_timestamps, tolerance, 'mean')
-        total_monotonicity += monotonicity_vec(Y_pred_binary, 'mean')
-        total_coverage += score_coverage_vec(Y_pred_binary, 'mean')
+        total_distance += temporal_distance(Y_pred_binary, Y, midi_event_timestamps, tolerance)
+        total_accuracy += binary_accuracy(Y_pred_binary, Y, midi_event_timestamps, tolerance)
+        total_monotonicity += monotonicity(Y_pred_binary)
+        total_coverage += score_coverage(Y_pred_binary)
 
     return total_loss / len(dataloader), total_distance / len(dataloader), total_accuracy / len(dataloader), total_monotonicity / len(dataloader), total_coverage / len(dataloader)
-        
+
 
 def main():
     # Parse arguments: model_path, evaluation_data_path, tau
@@ -98,7 +98,8 @@ def main():
     model = load_model(model_path)
     evaluation_dataset = MaestroDataset(evaluation_data_path, 'test')
     dataloader = DataLoader(
-        dataset=evaluation_dataset, 
+        dataset=evaluation_dataset,
+        batch_size=1,
         num_workers=4,
         collate_fn=MaestroDataset.collate_fn
     )
