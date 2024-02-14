@@ -58,14 +58,14 @@ def evaluate(
 
     # Compute loss and metrics for each batch with tqdm
     for batch in tqdm(dataloader):
-        Y = batch.Y_b.transpose(-2, -1) # (N, X, E) -> (N, E, X)
+        Y = batch.Y.transpose(-2, -1) # (N, X, E) -> (N, E, X)
 
         # get model predictions given audio frames and score events
         Y_pred = model(
-            batch.audio_frames_b,
-            score_ids=batch.score_ids_b,
-            score_attn_mask=batch.score_attn_mask_b,
-            event_padding_mask=batch.event_padding_mask_b
+            batch.audio_frames,
+            score_ids=batch.score_ids,
+            score_attn_mask=batch.score_attn_mask,
+            event_padding_mask=batch.event_padding_mask
         ).tranpose(-2, -1) # (N, X, E) -> (N, E, X)
 
         total_loss += compute_loss(Y_pred, batch.Y, midi_event_timestamps, 'mean')
