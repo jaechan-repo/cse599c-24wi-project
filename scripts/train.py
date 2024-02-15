@@ -56,6 +56,7 @@ if __name__ == "__main__":
     parser.add_argument('--accelerator', type=str, default='gpu')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--batch_size', type=int, default=8)
+    parser.add_argument('--nm_penalty', type=float, default=None)
     args = parser.parse_args()
 
     if args.save_every_step is not None \
@@ -68,7 +69,7 @@ if __name__ == "__main__":
         data_dir="../data/maestro-v3.0.0",
         batch_size=args.batch_size,
         learning_rate=1e-4/16 * args.batch_size,
-        invalid_pred_penalty=1000,
+        nm_penalty=args.nm_penalty,
         num_dataloader_workers=0
     )
 

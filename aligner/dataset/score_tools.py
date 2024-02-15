@@ -1,108 +1,13 @@
 import torch
 import torch.nn.functional as F
-from torch import Tensor, LongTensor, BoolTensor
-import torchaudio
+from torch import LongTensor, BoolTensor
 from typing import List, Optional, Tuple, NamedTuple
 from ..utils.constants import *
 import pretty_midi as pm
 import pandas as pd
-from random import randrange
 from bisect import bisect_left
 from memory_profiler import profile
-
-
-_transform = torchaudio.transforms.MelSpectrogram(
-    sample_rate=SAMPLE_RATE,
-    n_fft=N_FFT,
-    hop_length=HOP_LENGTH,
-    n_mels=N_MELS,
-    f_min=F_MIN,
-    f_max=F_MAX,
-    center=True # pad waveform on both sides
-)
-
-
-def t2fi(timestamp: float) -> int:
-    return timestamp // AUDIO_RESOLUTION
-
-
-def sample_interval(imin: int, imax: int,
-                    jmin: int, jmax: int, 
-                    ) -> Tuple[int, int]:
-    assert imin <= imax < jmin <= jmax
-    i = randrange(imin, imax+1)
-    j = randrange(jmin, jmax+1)
-    return i, j
-
-
-def load_spectrogram(uri: str) -> torch.Tensor:
-    """Given path to audio file, computes a Mel spectrogram.
-
-    Args:
-        uri (str): Path to audio file. *.wav, *.mp3.
-
-    Returns:
-        Mel spectrogram. Size: (n_frames, N_MELS).
-    """
-
-    signal, sr = torchaudio.load(uri)
-
-    # Resample if the audio's sr differs from our target sr
-    if sr != SAMPLE_RATE:
-        resampler = torchaudio.transforms.Resample(sr, SAMPLE_RATE)
-        signal = resampler(signal)
-
-    signal = torch.mean(signal, dim=0)
-    signal: torch.Tensor = _transform(signal)
-
-    return signal.transpose(0, 1)
-
-
-def _pad_spectrogram(signal: torch.Tensor) -> torch.Tensor:
-    n_frames = len(signal)
-    min_size = max(N_FRAMES_PER_CLIP, n_frames)
-
-    if min_size % N_FRAMES_PER_STRIDE != 0:
-        padding_size = min_size + N_FRAMES_PER_STRIDE - (min_size % N_FRAMES_PER_STRIDE) - n_frames
-    else:
-        padding_size = min_size - n_frames
-
-    signal = F.pad(signal, (0, 0, 0, padding_size), value=0)
-
-    assert signal.shape[-1] == N_MELS
-    return signal
-
-
-def unfold_spectrogram(signal: torch.Tensor) -> torch.Tensor:
-    """Unfolds the spectrogram into overlapping clips.
-
-    The number of frames allocated to each clip is given by
-    the constant `N_FRAMES_PER_CLIP`. The number of overlapping
-    frames between two neighboring clips is given by
-    `N_FRAMES_PER_CLIP - N_FRAMES_PER_STRIDE`. The function pads
-    to the multiple of `N_FRAMES_PER_STRIDE` if the number of frames
-    in the spectrogram is not divisible by `N_FRAMES_PER_STRIDE`.
-
-    For fully expected behavior, first load the spectrogram with
-    :func:`load_spectrogram` and apply this function to the
-    loaded spectrogram.
-
-    Args:
-        signal (torch.Tensor): Spectrogram. 
-                               Size: (n_frames, N_MELS)
-
-    Returns:
-        Clipped spectrogram. Size (n_clips, N_FRAMES_PER_CLIP, N_MELS)
-    """
-    signal = _pad_spectrogram(signal)
-    signal_clips = signal.unfold(dimension=0,
-                                 size=N_FRAMES_PER_CLIP,
-                                 step=N_FRAMES_PER_STRIDE)
-    signal_clips = signal_clips.permute((0, 2, 1))
-    
-    assert signal_clips.shape[1] == N_FRAMES_PER_CLIP
-    assert signal_clips.shape[-1] == N_MELS
-    return signal_clips
+import sys
 
 
 def midi_to_pandas(uri: str,
@@ -154,7 +59,8 @@ def midi_to_pandas(uri: str,
 class ParsedMIDI:
 
     def __init__(self,
-                 midi: str | pd.DataFrame):
+                 midi: str | pd.DataFrame,
+                 lazy_align: bool = True):
 
         if isinstance(midi, str):
             self.midi = midi_to_pandas(midi, EVENT_RESOLUTION)
@@ -172,9 +78,11 @@ class ParsedMIDI:
         ##########################################
         self.last_fi = self._ei2fi[-1]
         self._fi2ei = {}
+        self.lazy_align = lazy_align
 
-        # This matrix takes up a LARGE amount of memory!
-        self.alignment_matrix: BoolTensor = torch.zeros((self.last_fi + 1, self.n_events), dtype=torch.bool)
+        if not self.lazy_align:
+            # This matrix takes up a LARGE amount of memory!
+            self.alignment_matrix: BoolTensor = torch.zeros((self.last_fi + 1, self.n_events), dtype=torch.bool)
 
         clip_fis = [afi for ci in range(1, self.last_fi // N_FRAMES_PER_STRIDE) \
                         for afi in (ci * N_FRAMES_PER_STRIDE - 1, ci * N_FRAMES_PER_STRIDE)]
@@ -182,11 +90,12 @@ class ParsedMIDI:
         for ei in range(self.n_events):
             self._fi2ei[self._ei2fi[ei]] = ei
 
-            if ei < self.n_events - 1:
-                self.alignment_matrix[self._ei2fi[ei]:self._ei2fi[ei+1], ei] = True
-            else:
-                # Last event. Only one timestamp exists.
-                self.alignment_matrix[self._ei2fi[ei], ei] = True
+            if not self.lazy_align:
+                if ei < self.n_events - 1:
+                    self.alignment_matrix[self._ei2fi[ei]:self._ei2fi[ei+1], ei] = True
+                else:
+                    # Last event. Only one timestamp exists.
+                    self.alignment_matrix[self._ei2fi[ei], ei] = True
 
             while ci < len(clip_fis) and (afi := clip_fis[ci]) < self._ei2fi[ei]:
                 # The current clip frame index falls behind the current event index,
@@ -236,6 +145,8 @@ class ParsedMIDI:
 
 
     def _fi2ei_naive(self, fi: int) -> int:
+        """O(log n_events).
+        """
         ei = bisect_left(self._ei2fi, fi)
         if ei:
             if ei < self.n_events and self._ei2fi[ei] == fi:
@@ -247,7 +158,7 @@ class ParsedMIDI:
 
 
     def fi2ei(self, fi: int) -> int:
-        """Convert audio frame index to event index
+        """Converts audio frame index to closest preceding event index.
         """
         if fi in self._fi2ei:
             return self._fi2ei[fi]
@@ -260,7 +171,7 @@ class ParsedMIDI:
 
 
     def ei2toki(self, ei: int) -> int:
-        """Convert event index to token index
+        """Converts event index to token index in self.score_ids.
         """
         assert 0 <= ei <= self.n_events, "Invalid event index."
         toki = self.event_pos[ei] if ei < self.n_events else self.n_tokens
@@ -269,6 +180,11 @@ class ParsedMIDI:
 
     def find_minimal_event_interval_covering(self, fi1: int, fi2: int
                                              ) -> Tuple[int, int]:
+        """Finds an event interval that minimally covers the given audio frame interval.
+        Both the input and output intervals are inclusive on the left and exclusive on
+        the right. In other words, the returned right-hand side bound of the event
+        interval might be the number of events (`self.n_events`), not a valid event index.
+        """
         assert fi1 < fi2, "fi1 has to be less than fi2."
         return self.fi2ei(fi1), self.fi2ei(fi2-1)+1
 
@@ -301,46 +217,6 @@ class ParsedMIDI:
         return min_ei1, max_ei2
 
 
-    def align(self,
-              afi1: int, afi2: int,
-              ei1: int, ei2: int
-              ) -> LongTensor:
-        assert ei1 < ei2, "ei1 must be less than ei2."
-
-        aei1, aei2 = self.find_minimal_event_interval_covering(afi1, afi2)
-        assert ei1 <= aei1 < aei2 <= ei2, "Audio must occur within the events." # TODO: v1
-
-        if (pad_size := afi2 - len(self.alignment_matrix)) > 0:
-            last_frame = self.alignment_matrix[-1]
-            padding = last_frame.repeat(pad_size, 1)
-            self.alignment_matrix = torch.cat([self.alignment_matrix, padding])
-
-        Y = self.alignment_matrix[afi1:afi2, ei1:ei2]
-        return Y
-    
-
-    def _align_naive(self,
-                     afi1: int, afi2: int,
-                     ei1: int, ei2: int
-                     ) -> LongTensor:
-        """Warning: Quadratic in time. NOT used and NOT tested.
-        """
-        assert ei1 < ei2, "ei1 must be less than ei2."
-        assert afi1 < afi2, "afi1 must be less than afi2."
-
-        aei1, aei2 = self.find_minimal_event_interval_covering(afi1, afi2)
-        assert ei1 <= aei1 < aei2 <= ei2, "Audio must occur within the events." # TODO: v1
-
-        Y = torch.zeros((afi2-afi1, ei2-ei1), dtype=torch.bool)
-
-        for ei in range(ei1, ei2):
-            fi1_ei = max(self._ei2fi[ei], afi1)
-            fi2_ei = min(self._ei2fi[ei], afi2)
-            Y[fi1_ei:fi2_ei, ei] = True
-
-        return Y
-
-
     class Encoding(NamedTuple):
         score_ids: LongTensor
         score_attn_mask: BoolTensor
@@ -364,3 +240,58 @@ class ParsedMIDI:
                 event_pos=self.event_pos[ei1:ei2])
 
         return self.score_ids[toki1:toki2]
+
+    def align(self,
+              afi1: int, afi2: int,
+              ei1: int, ei2: int
+              ) -> BoolTensor:
+        """Outputs the alignment matrix that corresponds to the given bounding box
+        of audio frame interval and event interval. The input intervals are expected
+        to be inclusive on the left and exclusive on the right.
+        Runs in O(1) if `self.lazy_align` set to False, O(self.n_events) otherwise.
+        """
+        assert ei1 < ei2, "ei1 must be less than ei2."
+
+        aei1, aei2 = self.find_minimal_event_interval_covering(afi1, afi2)
+        assert ei1 <= aei1 < aei2 <= ei2, "Audio must occur within the events." # TODO: v1
+
+        return self._align_eager(afi1, afi2, ei1, ei2) if not self.lazy_align \
+                else self._align_lazy(afi1, afi2, ei1, ei2)
+
+
+    def _align_eager(self,
+                     afi1: int, afi2: int,
+                     ei1: int, ei2: int
+                     ) -> BoolTensor:
+        if (pad_size := afi2 - len(self.alignment_matrix)) > 0:
+            last_frame = self.alignment_matrix[-1]
+            padding = last_frame.repeat(pad_size, 1)
+            self.alignment_matrix = torch.cat([self.alignment_matrix, padding])
+
+        Y = self.alignment_matrix[afi1:afi2, ei1:ei2]
+        return Y
+    
+
+    def _align_lazy(self,
+                    afi1: int, afi2: int,
+                    ei1: int, ei2: int
+                    ) -> BoolTensor:
+        Y: BoolTensor = torch.zeros((afi2-afi1, ei2-ei1), dtype=torch.bool)
+        ei_afi1, ei_afi2 = self.find_minimal_event_interval_covering(afi1, afi2)
+
+        for ei in range(max(ei_afi1, ei1), min(ei_afi2, ei2)):
+            # fi_ei1 is the frame that corresponds to ei (curr event).
+            # fi_ei2 is the frame that corresponds to ei+1 (next event).
+            # Our goal is to map all frames inbetween to ei (curr event).
+            fi1_ei = self._ei2fi[ei]
+            fi2_ei = self._ei2fi[ei+1] if ei+1 < self.n_events else sys.maxsize
+
+            # Shift according to the given bounding box
+            fi1_ei_rel, fi2_ei_rel = \
+                    max(fi1_ei, afi1) - afi1, min(fi2_ei, afi2) - afi1
+            ei_rel = ei - ei1
+
+            assert fi1_ei_rel < fi2_ei_rel
+            Y[fi1_ei_rel: fi2_ei_rel, ei_rel] = True
+
+        return Y
