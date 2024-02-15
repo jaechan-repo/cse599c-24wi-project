@@ -1,5 +1,4 @@
 import torch
-import torch.nn as nn
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from torch import Tensor
@@ -10,7 +9,7 @@ from aligner.utils.constants import *
 from aligner.model import AlignerModel, ModelConfig
 from aligner.utils.constants import *
 
-from typing import NamedTuple, Optional
+from typing import NamedTuple, Optional, Literal
 import gc
 
 
@@ -18,7 +17,7 @@ class LitModelConfig(NamedTuple):
     data_dir: str
     learning_rate: float
     batch_size: int
-    invalid_pred_penalty: Optional[float] = None
+    nm_penalty: Optional[float] = None
     num_dataloader_workers: int = 0
 
 
@@ -29,7 +28,6 @@ class AlignerLitModel(pl.LightningModule):
                  lit_model_config: LitModelConfig):
         super().__init__()
         self.model = AlignerModel.from_config(model_config)
-        self.criterion_unreduced = nn.BCELoss(reduction='none')
         self.config = lit_model_config
 
         # Save hyperparameters
@@ -38,25 +36,40 @@ class AlignerLitModel(pl.LightningModule):
 
 
     @staticmethod
-    def _monotonicity(Y_hat: torch.Tensor) -> bool:
-        """Designed for batch processing
+    def _metric_NM(Y_hat: torch.Tensor) -> float:
+        """Ranges from 0 to 1.
         """
         pred_indices = torch.argmax(Y_hat, dim=-1)
         diffs = pred_indices[:, 1:] - pred_indices[:, :-1]
-        return torch.all(diffs >= 0)
+        return torch.mean(torch.any(diffs < 0, dim=-1).float(), dim=-1)
 
 
-    def criterion(self, Y_hat: Tensor, Y: Tensor, padding_mask: Tensor) -> float:
-        assert Y_hat.shape == Y.shape, \
-                "Input and target must be of the same size."
+    @staticmethod
+    def _metric_EMD(Y_hat: Tensor, Y: Tensor, 
+                    reduction: Literal['mse', 'rmse', 'none'] = 'rmse'
+                    ) -> Tensor | float:
+        """Asymmetric earth mover distance
+        """
+        assert Y_hat.shape == Y.shape
 
-        n_events_b = padding_mask.sum()     # Total number of events, across the batches
-        loss = self.criterion_unreduced(Y_hat, Y)
-        loss = torch.sum(loss, dim=-1)      # Sum probabilities for events  (reflected in `n_events_b`)
-        loss = torch.mean(loss, dim=-1)     # Mean probabilities for audio
-        loss = torch.sum(loss, dim=-1)      # Sum probabilities for batches (reflected in `n_events_b`)
-        loss /= n_events_b
-        return loss
+        target = Y.argmax(dim=-1)
+        indices = torch.arange(Y.shape[-1]).view(1,1,-1).type_as(target)
+        sq = (indices - target.unsqueeze(-1)) ** 2
+        assert sq.shape == Y_hat.shape
+
+        loss = Y_hat * sq.float()   # unreduced
+        if reduction == 'none':
+            return loss
+
+        loss = loss.sum(dim=-1)
+        if reduction == 'mse':
+            return loss.mean()
+        if reduction == 'rmse':
+            return loss.sqrt().mean()
+
+
+    def criterion(self, Y_hat: Tensor, Y: Tensor) -> float:
+        return AlignerLitModel._metric_EMD(Y_hat, Y)
 
 
     def forward(self, *args, **kwargs) -> Tensor:
@@ -69,23 +82,16 @@ class AlignerLitModel(pl.LightningModule):
                       batch: MaestroDataset.Batch,
                       batch_idx: int):
         Y_hat = self.forward(**batch._asdict())
-        loss = self.criterion(Y_hat, batch.Y.float(), batch.event_padding_mask)
+        loss = self.criterion(Y_hat, batch.Y.int())
 
-        # Monotonicity constraint.
-        # TODO: Revisit for v1.
-        monotonic: int
-        if self.config.invalid_pred_penalty is None:
-            monotonic = -1
-        else:
-            if AlignerLitModel._monotonicity(Y_hat):
-                monotonic = 1
-            else:
-                # loss *= self.config.invalid_pred_penalty
-                monotonic = 0
+        # Monotonicity constraint
+        nm: float = AlignerLitModel._metric_NM(Y_hat)
+        if self.config.nm_penalty is not None and nm != 0:
+            loss *= self.config.nm_penalty * nm
 
         self.log_dict({
                 'train_loss': loss,
-                'monotonic': monotonic
+                'non_monotonicity': nm
             }, 
             on_step=True, on_epoch=False,
             sync_dist=True, batch_size=self.config.batch_size
@@ -97,7 +103,7 @@ class AlignerLitModel(pl.LightningModule):
     @torch.no_grad()
     def validation_step(self, batch: MaestroDataset.Batch, **_):
         Y_hat = self.forward(**batch._asdict())
-        loss = self.criterion(Y_hat, batch.Y.float(), batch.event_padding_mask)
+        loss = self.criterion(Y_hat, batch.Y.int())
         self.log(
             "val_loss", loss,
             on_step=True, on_epoch=True,
@@ -109,7 +115,7 @@ class AlignerLitModel(pl.LightningModule):
     def configure_optimizers(self):
         return AdamW(self.model.parameters(),
                      self.config.learning_rate)
-    
+
 
     def train_dataloader(self):
         train_data = MaestroDataset(self.config.data_dir,

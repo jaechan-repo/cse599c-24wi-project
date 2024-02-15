@@ -1,18 +1,23 @@
 from itertools import cycle
 from pathlib import Path
-from torch.utils.data import IterableDataset
 from collections.abc import Sequence
 from typing import Literal, List, Iterator, NamedTuple, Tuple
+
 import torch
 import torch.nn.functional as F
+from torch.utils.data import IterableDataset
 from torch import Tensor, LongTensor, BoolTensor
-import os
-from ..utils.constants import *
-from .toolbox import ParsedMIDI, load_spectrogram, unfold_spectrogram, sample_interval
+
 import pandas as pd
 from pandas import DataFrame
+
 import random
 from memory_profiler import profile
+import os
+
+from ..utils.constants import *
+from .score_tools import ParsedMIDI
+from .audio_tools import load_spectrogram, unfold_spectrogram, sample_interval
 
 
 class MaestroDataset(IterableDataset):
