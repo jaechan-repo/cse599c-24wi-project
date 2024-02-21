@@ -9,6 +9,7 @@ import torch
 from pytorch_lightning import Trainer
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning import seed_everything
 
 import argparse
 import gc
@@ -53,24 +54,31 @@ if __name__ == "__main__":
     parser.add_argument('--save_every_epoch', type=int, default=None,
         help="Trainer saves every given number of epochs."
     )
-    parser.add_argument('--accelerator', type=str, default='gpu')
-    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--start_at', type=int, default=0)
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--nm_penalty', type=float, default=None)
+    parser.add_argument('--num_workers', type=int, default=0)
+    parser.add_argument('--accelerator', type=str, default='gpu')
+    parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
 
     if args.save_every_step is not None \
             and args.save_every_epoch is not None:
         ValueError("Specify only one of --save_every_step or --save_every_epoch.")
 
-    set_seed(args.seed)
+    if args.save_every_step is None \
+            and args.save_every_epoch is None:
+        args.save_every_epoch = 1
+
+    seed_everything(args.seed)
 
     lit_model_config = LitModelConfig(
         data_dir="../data/maestro-v3.0.0",
         batch_size=args.batch_size,
         learning_rate=1e-4/16 * args.batch_size,
         nm_penalty=args.nm_penalty,
-        num_dataloader_workers=0
+        num_dataloader_workers=args.num_workers,
+        start_at=args.start_at
     )
 
     model = AlignerLitModel(model_config, lit_model_config)
@@ -87,10 +95,12 @@ if __name__ == "__main__":
         accelerator=args.accelerator,
         max_epochs=-1,    # infinite
         check_val_every_n_epoch=1,
+        limit_val_batches=200,
         logger=wandb_logger,
         log_every_n_steps=50,
         default_root_dir=args.save_to_path,
-        callbacks=[checkpoint_callback]
+        callbacks=[checkpoint_callback],
+        # deterministic=True,   # Slows down
     )
 
     trainer.fit(model, ckpt_path=args.load_from_path)

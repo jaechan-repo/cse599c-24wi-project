@@ -1,5 +1,6 @@
 import urllib.request
 import shutil
+import pandas as pd
 
 
 DATASET_URL = "https://storage.googleapis.com/magentadata/datasets/maestro/v3.0.0/maestro-v3.0.0.zip"

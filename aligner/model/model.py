@@ -29,7 +29,7 @@ class ScoreEncoderBlock(nn.Module):
                  attn_dropout: float = 0.0,
                  ffn_dropout: float = 0.5,
                  ffn_expansion: int = 4):
-        super(ScoreEncoderBlock, self).__init__()
+        super().__init__()
 
         self.SelfAttn = MultiheadALiBiSelfAttention(d_embed, n_heads, attn_dropout)
 
@@ -69,10 +69,9 @@ class ScoreEncoder(nn.Module):
                  ffn_dropout: float = 0.5,
                  ffn_expansion: int = 4,
                  n_layers: int = 5):
-        super(ScoreEncoder, self).__init__()
+        super().__init__()
         self.Lookup = nn.Embedding(vocab_size, d_score,
-                                         padding_idx=TOKEN_ID['[PAD]'])
-
+                                   padding_idx=TOKEN_ID['[PAD]'])
         self.EncoderBlocks = nn.ModuleList([
             ScoreEncoderBlock(
                 d_score, n_heads, attn_dropout, ffn_dropout, ffn_expansion
@@ -101,7 +100,7 @@ class AudioEncoderBlock(nn.Module):
                  attn_dropout: float = 0.0,
                  ffn_dropout: float = 0.5,
                  ffn_expansion: int = 4):
-        super(AudioEncoderBlock, self).__init__()
+        super().__init__()
 
         self.SelfAttn = MultiheadALiBiSelfAttention(d_audio, n_heads, attn_dropout)
         self.XAttn = MultiheadAttention(d_audio, d_score, n_heads,
@@ -151,7 +150,7 @@ class AudioEncoder(nn.Module):
                  ffn_dropout: float = 0.5,
                  ffn_expansion: int = 4,
                  n_layers: int = 5):
-        super(AudioEncoder, self).__init__()
+        super().__init__()
 
         self.EncoderBlocks = nn.ModuleList([AudioEncoderBlock(
             d_audio, d_score, n_heads,
@@ -173,9 +172,6 @@ class AudioEncoder(nn.Module):
 
 
 class CrossAttentionHead(nn.Module):
-    """Alignment head implemented as cross-attention.
-    The only learnable components are the query and key projectors.
-    """
 
     def __init__(self, d_audio: int, d_score: int, bias=True):
         super().__init__()
@@ -189,7 +185,6 @@ class CrossAttentionHead(nn.Module):
                 event_embed: Tensor,
                 event_padding_mask: Optional[BoolTensor] = None
                 ) -> Tensor:
-
         _, n_frames, _ = audio_embed.shape
 
         Q: Tensor = self.Linear_Q(audio_embed)
@@ -202,7 +197,6 @@ class CrossAttentionHead(nn.Module):
             attn = attn.masked_fill(event_padding_mask == 0, float('-inf'))
 
         out = torch.softmax(attn, dim=-1)
-
         assert not out.isnan().any()
         return out
     
@@ -270,8 +264,10 @@ class AlignerModel(nn.Module):
                     Size: (batch_size, max_n_tokens, d_score)
             score_attn_mask (BoolTensor): Boolean self-attention mask for the
                     score encoder. Size: (batch_size, max_n_tokens, max_n_tokens).
-            score_to_event (BoolTensor): TODO
-            event_padding_mask (BoolTensor): TODO
+            score_to_event (BoolTensor): Projection matrix that selects event markers.
+                    Size: (batch_size, max_n_events, max_n_tokens)
+            event_padding_mask (BoolTensor): Padding mask for the events. Mostly 1s.
+                    Size: (batch_size, max_n_events)
 
         Returns:
             Tensor: Alignment matrix.
