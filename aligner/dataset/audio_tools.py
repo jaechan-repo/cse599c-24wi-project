@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn.functional as F
 import torchaudio
@@ -6,15 +7,11 @@ from ..utils.constants import *
 from random import randrange
 
 
-_transform = torchaudio.transforms.MelSpectrogram(
-    sample_rate=SAMPLE_RATE,
-    n_fft=N_FFT,
-    hop_length=HOP_LENGTH,
-    n_mels=N_MELS,
-    f_min=F_MIN,
-    f_max=F_MAX,
-    center=True # pad waveform on both sides
-)
+def get_duration(audio_uri: str) -> float:
+    # Load the audio file
+    waveform, sample_rate = torchaudio.load(audio_uri)
+    duration = waveform.shape[1] / sample_rate
+    return duration
 
 
 def t2fi(timestamp: float) -> int:
@@ -30,6 +27,28 @@ def sample_interval(imin: int, imax: int,
     return i, j
 
 
+_empty_transform = torchaudio.transforms.MelSpectrogram(
+    sample_rate=SAMPLE_RATE,
+    n_fft=N_FFT,
+    hop_length=HOP_LENGTH,
+    n_mels=0,
+    f_min=F_MIN,
+    f_max=F_MAX,
+    center=True # pad waveform on both sides
+)
+
+
+_transform = torchaudio.transforms.MelSpectrogram(
+    sample_rate=SAMPLE_RATE,
+    n_fft=N_FFT,
+    hop_length=HOP_LENGTH,
+    n_mels=N_MELS,
+    f_min=F_MIN,
+    f_max=F_MAX,
+    center=True # pad waveform on both sides
+)
+
+
 def load_spectrogram(uri: str) -> torch.Tensor:
     """Given path to audio file, computes a Mel spectrogram.
 
@@ -39,32 +58,33 @@ def load_spectrogram(uri: str) -> torch.Tensor:
     Returns:
         Mel spectrogram. Size: (n_frames, N_MELS).
     """
-
     signal, sr = torchaudio.load(uri)
 
     # Resample if the audio's sr differs from our target sr
     if sr != SAMPLE_RATE:
         resampler = torchaudio.transforms.Resample(sr, SAMPLE_RATE)
         signal = resampler(signal)
-
     signal = torch.mean(signal, dim=0)
     signal: torch.Tensor = _transform(signal)
-
     return signal.transpose(0, 1)
+
+
+def get_num_frames(uri: str) -> int:
+    signal, sr = torchaudio.load(uri)
+    if sr != SAMPLE_RATE:
+        resampler = torchaudio.transforms.Resample(sr, SAMPLE_RATE)
+        signal = resampler(signal)
+    signal = torch.mean(signal, dim=0)
+    signal: torch.Tensor = _empty_transform(signal)
+    return signal.shape[1]
 
 
 def _pad_spectrogram(signal: torch.Tensor) -> torch.Tensor:
     n_frames = len(signal)
-    min_size = max(N_FRAMES_PER_CLIP, n_frames)
-
-    if min_size % N_FRAMES_PER_STRIDE != 0:
-        padding_size = min_size + N_FRAMES_PER_STRIDE - (min_size % N_FRAMES_PER_STRIDE) - n_frames
-    else:
-        padding_size = min_size - n_frames
-
-    signal = F.pad(signal, (0, 0, 0, padding_size), value=0)
-
-    assert signal.shape[-1] == N_MELS
+    new_n_frames = math.ceil(n_frames / N_FRAMES_PER_STRIDE) * N_FRAMES_PER_STRIDE  # Multiple of stride size
+    new_n_frames = max(new_n_frames, N_FRAMES_PER_CLIP)     # One CLIP at the very least
+    signal = F.pad(signal, (0, 0, 0, new_n_frames - n_frames), value=0)
+    assert signal.shape == (new_n_frames, N_MELS)
     return signal
 
 

@@ -6,9 +6,6 @@ from ..utils.constants import *
 import math
 
 
-NEG_INF = -1e9
-
-
 class MultiheadAttention(nn.Module):
     
     def __init__(self,
@@ -18,7 +15,7 @@ class MultiheadAttention(nn.Module):
                  bias: bool = True,
                  dropout: float = 0.0,
                  pos_encoding: Literal["alibi"] | None = None):
-        super(MultiheadAttention, self).__init__()
+        super().__init__()
 
         assert d_k % n_heads == 0, \
                 "Attention dim must be divisible by specified num heads."
@@ -42,7 +39,6 @@ class MultiheadAttention(nn.Module):
                 key: Tensor,
                 attn_mask: Optional[Tensor] = None
                 ) -> Tensor:
-
         bsz, len_q, d_embed = embed.shape
         # assert d_embed == self.d_embed
 
@@ -54,7 +50,7 @@ class MultiheadAttention(nn.Module):
         K_h = K.view(bsz, len_k, self.n_heads, self.d_h).permute(0, 2, 1, 3)
         V_h = V.view(bsz, len_k, self.n_heads, self.d_h).permute(0, 2, 1, 3)
 
-        attn = Q_h @ K_h.transpose(2, 3)
+        attn: Tensor = Q_h @ K_h.transpose(2, 3)
 
         if self.pos_encoding == 'alibi':
             assert len_q == len_k, "ALiBi is only supported for self-attention."
@@ -68,17 +64,17 @@ class MultiheadAttention(nn.Module):
         attn *= self.scale
 
         if attn_mask is not None:
-            attn_mask = attn_mask.float().unsqueeze(1)
-            attn = attn.masked_fill(attn_mask == 0, NEG_INF)
+            attn_mask = attn_mask.unsqueeze(1)
+            attn = attn.masked_fill(attn_mask == 0, float('-inf'))
 
-        attn = self.Dropout(torch.softmax(attn, dim=-1))
-
+        attn = torch.softmax(attn, dim=-1)
+        attn = self.Dropout(attn)
         out = attn @ V_h
         # assert out.shape == (bsz, self.n_heads, len_q, self.d_h)
 
         out = out.permute(0, 2, 1, 3).contiguous()
         out = out.view(bsz, len_q, d_embed)
-        out = self.Linear_O(out)
+        out: Tensor = self.Linear_O(out)
 
         assert not out.isnan().any()
         return out
@@ -90,7 +86,7 @@ class MultiheadALiBiSelfAttention(nn.Module):
                  d_embed: int,
                  n_heads: int,
                  dropout: float = 0.0):
-        super(MultiheadALiBiSelfAttention, self).__init__()
+        super().__init__()
         self.Attn = MultiheadAttention(d_embed,
                                        d_embed,
                                        n_heads,

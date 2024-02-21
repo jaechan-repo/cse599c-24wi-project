@@ -58,6 +58,7 @@ def midi_to_pandas(uri: str,
 
 class ParsedMIDI:
 
+    # @profile
     def __init__(self,
                  midi: str | pd.DataFrame,
                  lazy_align: bool = True):
@@ -122,21 +123,21 @@ class ParsedMIDI:
         assert self.event_pos.shape == (self.n_events,)
         
         # Local self-attention mask
-        local_event_score_attn_mask = torch.zeros((self.n_tokens, self.n_tokens),
-                                                  dtype=torch.long)
+        local_event_attn_mask = torch.zeros((self.n_tokens, self.n_tokens), dtype=torch.bool)
         for ei, toki1 in enumerate(self.event_pos):
             toki2 = self.n_tokens if ei == self.n_events - 1 else self.event_pos[ei+1]
-            local_event_score_attn_mask[toki1:toki2, toki1:toki2] = 1
+            local_event_attn_mask[toki1:toki2, toki1:toki2] = True
 
         # Global self-attention mask
-        event_mask = torch.zeros((self.n_tokens,), dtype=torch.long)
-        event_mask[self.event_pos] = 1
-        global_event_score_attn_mask = torch.outer(event_mask, event_mask)
+        event_mask = torch.zeros((self.n_tokens,), dtype=torch.bool)
+        event_mask[self.event_pos] = True
+        global_event_attn_mask = torch.outer(event_mask, event_mask)
 
         # Aggregate the two attention masks
         self.score_attn_mask: BoolTensor = \
-            (local_event_score_attn_mask + global_event_score_attn_mask).clamp(max=1).bool()
+            torch.logical_or(local_event_attn_mask, global_event_attn_mask)
         assert self.score_attn_mask.shape == (self.n_tokens, self.n_tokens)
+        del local_event_attn_mask, global_event_attn_mask   # These take up memory
 
         # Project score to event
         self.score_to_event: BoolTensor = \
@@ -144,9 +145,17 @@ class ParsedMIDI:
         assert self.score_to_event.shape == (self.n_events, self.n_tokens)
 
 
-    def _fi2ei_naive(self, fi: int) -> int:
-        """O(log n_events).
+    def get_frame_indices(self) -> List[int]:
+        """Outputs the frame indices of the score events.
+
+        Returns:
+            List[int]: Audio frame indices. Size: (n_events, )
         """
+        return self._ei2fi.copy()
+
+
+    def _fi2ei_naive(self, fi: int) -> int:
+        # O(log self.n_events)
         ei = bisect_left(self._ei2fi, fi)
         if ei:
             if ei < self.n_events and self._ei2fi[ei] == fi:
@@ -158,7 +167,8 @@ class ParsedMIDI:
 
 
     def fi2ei(self, fi: int) -> int:
-        """Converts audio frame index to closest preceding event index.
+        """Converts the given audio frame index to its closest preceding
+        event index.
         """
         if fi in self._fi2ei:
             return self._fi2ei[fi]
@@ -171,7 +181,8 @@ class ParsedMIDI:
 
 
     def ei2toki(self, ei: int) -> int:
-        """Converts event index to token index in self.score_ids.
+        """Converts the given event index to its corresponding token index,
+        i.e. its location in `self.score_ids`.
         """
         assert 0 <= ei <= self.n_events, "Invalid event index."
         toki = self.event_pos[ei] if ei < self.n_events else self.n_tokens
@@ -183,7 +194,8 @@ class ParsedMIDI:
         """Finds an event interval that minimally covers the given audio frame interval.
         Both the input and output intervals are inclusive on the left and exclusive on
         the right. In other words, the returned right-hand side bound of the event
-        interval might be the number of events (`self.n_events`), not a valid event index.
+        interval might be the number of events (`self.n_events`), instead of a valid 
+        event index.
         """
         assert fi1 < fi2, "fi1 has to be less than fi2."
         return self.fi2ei(fi1), self.fi2ei(fi2-1)+1
@@ -213,27 +225,26 @@ class ParsedMIDI:
                 and self.ei2toki(max_ei2 + 1) - self.ei2toki(min_ei1) <= max_n_tokens:
             max_ei2 += 1
 
-        assert 0 <= min_ei1 <= ei1 < ei2 <= max_ei2 <= self.n_events
+        assert 0 <= min_ei1 <= ei1 < ei2 <= max_ei2 <= self.n_events, "Error!"
         return min_ei1, max_ei2
-
-
-    class Encoding(NamedTuple):
-        score_ids: LongTensor
-        score_attn_mask: BoolTensor
-        score_to_event: BoolTensor
-        event_pos: LongTensor
 
 
     def encode(self,
                ei1: int, ei2: int,
                return_tuple: bool = True
-               ) -> Encoding | LongTensor:
+               ) -> Tuple | LongTensor:
         assert ei1 < ei2, "ei1 has to be less than ei2."
+
+        class Encoding(NamedTuple):
+            score_ids: LongTensor
+            score_attn_mask: BoolTensor
+            score_to_event: BoolTensor
+            event_pos: LongTensor
 
         toki1, toki2 = self.ei2toki(ei1), self.ei2toki(ei2)
 
         if return_tuple:
-            return ParsedMIDI.Encoding(
+            return Encoding(
                 score_ids=self.score_ids[toki1:toki2],
                 score_attn_mask=self.score_attn_mask[toki1:toki2, toki1:toki2],
                 score_to_event=self.score_to_event[ei1:ei2, toki1:toki2],
@@ -241,6 +252,8 @@ class ParsedMIDI:
 
         return self.score_ids[toki1:toki2]
 
+
+    # @profile
     def align(self,
               afi1: int, afi2: int,
               ei1: int, ei2: int

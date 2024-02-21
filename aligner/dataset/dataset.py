@@ -1,5 +1,3 @@
-from itertools import cycle
-from pathlib import Path
 from collections.abc import Sequence
 from typing import Literal, List, Iterator, NamedTuple, Tuple
 
@@ -9,181 +7,181 @@ from torch.utils.data import IterableDataset
 from torch import Tensor, LongTensor, BoolTensor
 
 import pandas as pd
-from pandas import DataFrame
-
-import random
-from memory_profiler import profile
 import os
 
 from ..utils.constants import *
 from .score_tools import ParsedMIDI
-from .audio_tools import load_spectrogram, unfold_spectrogram, sample_interval
+from .audio_tools import load_spectrogram, unfold_spectrogram, sample_interval, get_num_frames
+
+import numpy as np
+
+import math
+from tqdm import tqdm
 
 
-class MaestroDataset(IterableDataset):
+class AlignDataset(IterableDataset):
+    """
+    Note 1: If you want to shuffle, pass `shuffle = True` in the initialization.
+    Shuffling outside of this class definition (e.g., as in DataLoader) is HIGHLY
+    DISCOURAGED, since the `__getitem__()` operation of this class is no longer
+    asymtotically O(1).
+
+    Note 2: Why do we use `IterableDataset`? Performance degradation is huge if we
+    use the map-based `Dataset` module instead.
+    """
 
     class Item(NamedTuple):
-        """Return type of the dataset iterator when split is 'train' or 
-        'validation'.
-
-        Args:
-            id_ (Tuple[int, int]): Unique identifier of the item. First index
-                corresponds to the index of the audio file as written in
-                metadata.csv. The second index corresponds to the clip number
-                of this audio clip within the whole audio file that contains the 
-                clip.
-            audio_frames (Tensor): ~10 sec spectrogram. 
-                Size: (N_MELS, N_FRAMES_PER_CLIP).
-            score_ids (BoolTensor): Tokenization (int array representation) of the MIDI. 
-                This is the encoding that the transformer receives. Size: (n_tokens,).
-            event_padding_mask (BoolTensor): Marks the positions of event markers in the
-                score_ids with 1s, the rest with 0s. Size: (n_tokens,)
-            score_attn_mask (BoolTensor): Self-attention mask for the score encoder.
-                Size: (n_tokens, n_tokens).
-            Y (Tensor): gold alignment matrix. Size: (N_FRAMES_PER_CLIP, n_events).
-        """
         id_: Tuple[int, int]
+        clip_idx: int
         audio_frames: Tensor
-
         score_ids: LongTensor
         score_attn_mask: BoolTensor
-
         score_to_event: BoolTensor
         event_pos: LongTensor
-
         Y: BoolTensor
 
-
     class ItemWithMetadata(Item):
-        """Return type of the dataset iterator when split is 'test'. Extends
-        the `Item` type above.
-
-        Args:
-            audio (Tensor): Full spectrogram that the current clip belongs to.
-                Size: (n_frames, N_MELS)
-            midi (DataFrame): Pandas dataframe representation of the full midi.
-            audio_frame_interval (Tuple[int, int]): starting frame index and 
-                ending frame index of the current audio clip.
-            event_interval (Tuple[int, int]): starting event index and ending
-                frame index of the current event clip.
-        """
         audio: Tensor
-        midi: DataFrame
+        events: List[int]
+        audio_resolution: int
+        event_resolution: int
         audio_frame_interval: Tuple[int, int]
         event_interval: Tuple[int, int]
 
-
     class Batch(NamedTuple):
-        """Return type of the dataloader when `func:collate_fn` is applied.
-        """
         id_: List[Tuple[int, int]]
         audio_frames: Tensor                # (B, N_FRAMES_PER_CLIP, N_MELS)
-
         score_ids: LongTensor               # (B, max_n_tokens)
         score_attn_mask: BoolTensor         # (B, max_n_tokens, max_n_tokens)
-
         score_to_event: BoolTensor          # (B, max_n_events, max_n_tokens)
         event_pos: List[LongTensor]         # (B) * (n_events,)
         event_padding_mask: BoolTensor      # (B, max_n_events)
-
         Y: BoolTensor                       # (B, N_FRAMES_PER_CLIP, max_n_events)
 
 
-    def __init__(self, 
-                 root_dir: str, # path to MAESTRO dataset
-                 split: Literal['train', 'validation', 'test'] = 'train'):
+    def __init__(self,
+                 midi_uris: Sequence[str],
+                 audio_uris: Sequence[str],
+                 split: Literal['train', 'validation', 'test'],
+                 shuffle: bool = False,
+                 ids: Sequence | None = None,
+                 ns_frames: Sequence[int] | None = None,
+                 start_at: int = 0  # For fault tolerance
+                 ):
 
-        if split not in {'train', 'validation', 'test'}:
-            raise TypeError("Allowed values for split: 'train', 'validation', 'test'")
+        self.start_at = start_at
+        self.n_uris = len(midi_uris)
+        assert len(audio_uris) == self.n_uris
+
+        if ids is None:
+            ids = range(self.n_uris)
+        assert len(ids) == len(set(ids)) == self.n_uris
 
         self.split = split
-        self.metadata = pd.read_csv(os.path.join(root_dir, "maestro-v3.0.0.csv"))
-        
-        metadata_split = self.metadata[self.metadata['split'] == split]
 
-        self.randomized = split == 'train'
-        if self.randomized:
-            metadata_split = metadata_split.sample(frac=1)
+        if shuffle:
+            ids, midi_uris, audio_uris = np.array(ids), np.array(midi_uris), np.array(audio_uris)
+            perm = np.random.permutation(self.n_uris)
+            ids, midi_uris, audio_uris = ids[perm], midi_uris[perm], audio_uris[perm]
+            if ns_frames is not None:
+                ns_frames = np.array(ns_frames)[perm]
 
-        self.ids: Sequence[int] = metadata_split.index
-        self.midi_uris: Sequence[str] = metadata_split['midi_filename'].apply(
-                lambda filename: os.path.join(root_dir, filename))
-        self.audio_uris: Sequence[str] = metadata_split['audio_filename'].apply(
-                lambda filename: os.path.join(root_dir, filename))
+        if ns_frames is None:
+            print("Preprocessing...")
+
+        self.data: List[Tuple] = []     # (id_, midi_uri, audio_uri, clip_idx)\
+        for i in range(self.n_uris):
+
+            id_, midi_uri, audio_uri = ids[i], midi_uris[i], audio_uris[i]
+            if ns_frames is not None:
+                n_frames = ns_frames[i]
+            else:
+                n_frames = get_num_frames(audio_uri)
+
+            n_clips = math.ceil(
+                max(n_frames - N_FRAMES_PER_CLIP, 0) / N_FRAMES_PER_STRIDE
+            ) + 1
+
+            for clip_idx in range(n_clips):
+                self.data.append((
+                    id_, midi_uri, audio_uri, clip_idx
+                ))
+
+        self.curr_idx: int = None
+        self.curr_id_ = None
+        self.curr_midi: ParsedMIDI = None
+        self.curr_audio_clips: Tensor = None
 
 
-    def _preprocess(self) -> Iterator[Item]:
+    def __len__(self) -> int:
+        return len(self.data)
 
-        for id_, audio_uri, midi_uri in zip(self.ids, self.audio_uris, self.midi_uris):
 
+    def __getitem__(self, i: int) -> Item:
+        id_, midi_uri, audio_uri, clip_idx = self.data[i]
+
+        if id_ != self.curr_id_:
+            self.curr_id_ = id_
             audio = load_spectrogram(audio_uri)
-            audio_clips: List[Tuple[int, Tensor]] = list(enumerate(unfold_spectrogram(audio)))
-            n_frames = N_FRAMES_PER_STRIDE * (len(audio_clips)-1) \
-                     + N_FRAMES_PER_CLIP
+            self.curr_audio_clips = unfold_spectrogram(audio)
+            self.curr_midi = ParsedMIDI(midi_uri, lazy_align=True)
 
-            if self.randomized:
-                random.shuffle(audio_clips)
+        midi, audio_clips = self.curr_midi, self.curr_audio_clips
 
-            midi = ParsedMIDI(midi_uri)
+        # Audio frame interval, [afi1, afi2).
+        # INCLUSIVE on the left, EXCLUSIVE on the right.
+        afi1 = clip_idx * N_FRAMES_PER_STRIDE
+        afi2 = afi1 + N_FRAMES_PER_CLIP
 
-            for ci, audio_clip in audio_clips:
-                assert len(audio_clip) == N_FRAMES_PER_CLIP
+        # Event interval corresponding to [afi1, afi2).
+        # This is the most MINIMAL interval of events that covers the span of
+        # audio from afi1 to afi2.
+        ei1, ei2 = midi.find_minimal_event_interval_covering(afi1, afi2)
+        n_tokens = midi.ei2toki(ei2) - midi.ei2toki(ei1)
 
-                # Audio frame interval.
-                # Inclusive on the left, exclusive on the right.
-                afi1 = ci * N_FRAMES_PER_STRIDE
-                afi2 = afi1 + N_FRAMES_PER_CLIP
+        # Search for a larger event interval
+        # if this minimal event interval doesn't exceed MAX_N_TOKENS.
+        if n_tokens <= MAX_N_TOKENS:
+            # [min_ei1, max_ei2) is the MAXIMAL event interval
+            # such that the interval length doesn't exceed MAX_N_TOKENS.
+            min_ei1, max_ei2 = midi.find_maximal_event_interval_covering(ei1, ei2, MAX_N_TOKENS)
+            assert 1 <= midi.ei2toki(max_ei2) - midi.ei2toki(min_ei1) <= MAX_N_TOKENS
 
-                # Event interval corresponding to [afi1, afi2). This is the most MINIMAL 
-                # interval of events that covers the span of music from afi1 and afi2.
-                ei1, ei2 = midi.find_minimal_event_interval_covering(afi1, afi2)
-                n_tokens = midi.ei2toki(ei2) - midi.ei2toki(ei1)
+            if self.split == 'train':
+                # If the split is train, randomly sample an event interval
+                # between the minimal and maximal intervals.
+                ei1, ei2 = sample_interval(min_ei1, ei1, ei2, max_ei2)
+            else:
+                # Otherwise, take the maximal interval.
+                ei1, ei2 = min_ei1, max_ei2
 
-                # Search for a larger event interval if this minimal event interval
-                # doesn't exceed MAX_N_TOKENS.
-                if n_tokens <= MAX_N_TOKENS:
-                    # [min_ei1, max_ei2) is the MAXIMAL event interval such that
-                    # the interval length doesn't exceed MAX_N_TOKENS.
-                    min_ei1, max_ei2 = midi.find_maximal_event_interval_covering(ei1, ei2, MAX_N_TOKENS)
-                    assert midi.ei2toki(max_ei2) - midi.ei2toki(min_ei1) <= MAX_N_TOKENS
+        Y = midi.align(afi1, afi2, ei1, ei2)
+        item = AlignDataset.Item(id_=id_,
+                                 clip_idx=clip_idx, 
+                                 audio_frames=audio_clips[clip_idx],
+                                 Y=Y,
+                                 **(midi.encode(ei1, ei2)._asdict()))
 
-                    if self.randomized:
-                        # If train, randomly sample between the minimal and maximal interval.
-                        ei1, ei2 = sample_interval(min_ei1, ei1, ei2, max_ei2)
-                    else:
-                        # Otherwise, we take the minimal interval.
-                        ei1, ei2 = min_ei1, max_ei2
-
-
-                encoding: ParsedMIDI.Encoding = midi.encode(ei1, ei2)
-                Y: Tensor = midi.align(afi1, afi2, ei1, ei2)
-
-                item = MaestroDataset.Item(id_=(id_, ci),
-                                           audio_frames=audio_clip,
-                                           Y=Y,
-                                           **encoding._asdict())
-
-                if self.split == 'test':
-                    item = MaestroDataset.ItemWithMetadata(audio=audio,
-                                                           midi=midi.midi,
-                                                           audio_frame_interval=(afi1, afi2),
-                                                           event_interval=(ei1, ei2),
-                                                           **item._asdict())
-                yield item
+        if self.split == 'test':
+            item = AlignDataset.ItemWithMetadata(audio_uri=audio_uri,
+                                                 audio_resolution=AUDIO_RESOLUTION,
+                                                 audio_frame_interval=(afi1, afi2),
+                                                 midi_uri=midi_uri,
+                                                 events=midi.get_frame_indices(),
+                                                 event_resolution=EVENT_RESOLUTION,
+                                                 event_interval=(ei1, ei2),
+                                                 **item._asdict())
+        return item
 
 
     def __iter__(self) -> Iterator[Item]:
-        """Iterator for the MAESTRO dataset.
-
-        Yields:
-            Item: See the doc above.
-        """
-        if self.split == 'train':
-            return cycle(self._preprocess())
-        else:
-            return self._preprocess()
+        for idx in range(self.start_at, self.__len__()):
+            self.idx = idx
+            yield self.__getitem__(idx)
 
 
+    # @profile
+    @staticmethod
     def collate_fn(batch: List[Item]) -> Batch:
         batch_size = len(batch)
         id_= [item.id_ for item in batch]
@@ -201,9 +199,17 @@ class MaestroDataset(IterableDataset):
 
         # score_attn_mask
         tensors = [item.score_attn_mask for item in batch]
+
+        # Prevent non-padding queries from attending to padding keys
+        score_attn_mask = [
+            F.pad(t, (0, max_n_tokens-t.size(1)), value=False)
+            for t in tensors
+        ]
+        # Allow padding keys to attend to anything (doesn't matter)
         score_attn_mask: BoolTensor = torch.stack([
-            F.pad(t, (0, max_n_tokens-t.size(1), 0, max_n_tokens-t.size(0)),
-                  value=False) for t in tensors])
+            F.pad(t, (0, 0, 0, max_n_tokens-t.size(0)), value=True) 
+            for t in score_attn_mask
+        ])
         assert score_attn_mask.shape == (batch_size, max_n_tokens, max_n_tokens)
 
         # event_pos
@@ -230,7 +236,7 @@ class MaestroDataset(IterableDataset):
             ) for t in tensors])
         assert Y.shape == (batch_size, N_FRAMES_PER_CLIP, max_n_events)
 
-        return MaestroDataset.Batch(
+        return AlignDataset.Batch(
             id_=id_,
             audio_frames=audio_frames,
             score_ids=score_ids,
@@ -239,3 +245,36 @@ class MaestroDataset(IterableDataset):
             event_pos=event_pos,
             event_padding_mask=event_padding_mask,
             Y=Y)
+
+
+class MaestroDataset(AlignDataset):
+
+    def __init__(self,
+                 root_dir: str,
+                 split: Literal['train', 'validation', 'test'],
+                 shuffle: bool = False,
+                 start_at: int = 0):
+        assert split in {'train', 'validation', 'test'}
+        metadata = pd.read_csv(os.path.join(root_dir, "maestro-v3.0.0.csv"))
+
+        if 'n_frames' not in metadata.columns:
+            print("Preprocessing...")
+            ns_frames = []
+            for audio_uri in tqdm(metadata['audio_filename']):
+                ns_frames.append(
+                    get_num_frames(os.path.join(root_dir, audio_uri))
+                )
+            metadata['n_frames'] = ns_frames
+            metadata.to_csv(os.path.join(root_dir, "maestro-v3.0.0.csv"), index=False)
+
+        metadata_split = metadata[metadata['split'] == split]
+
+        ids = list(metadata_split.index)
+        midi_uris = list(metadata_split['midi_filename'].apply(
+                lambda filename: os.path.join(root_dir, filename)))
+        audio_uris = list(metadata_split['audio_filename'].apply(
+                lambda filename: os.path.join(root_dir, filename)))
+        ns_frames = list(metadata_split['n_frames'])
+        assert len(ids) == len(midi_uris) == len(audio_uris) == len(ns_frames)
+
+        super().__init__(midi_uris, audio_uris, split, shuffle, ids, ns_frames)
