@@ -111,20 +111,21 @@ def main():
     
     metrics = evaluate(model, dataloader, decoding, tolerance)
     
-    print(f'Evaluation Metrics with Tau={tolerance}\nLoss: {metrics['Loss']:.2f}, Distance: {metrics['Distance']:.2f}, Accuracy: {metrics['Accuracy']:.2f}, Monotonicity: {metrics['Monotonicity']:.2f}, Coverage: {metrics['Coverage']:.2f}')
+    print(f"Evaluation Metrics with Tau={tolerance}\nLoss: {metrics['Loss']:.2f}, Distance: {metrics['Distance']:.2f}, Accuracy: {metrics['Accuracy']:.2f}, Monotonicity: {metrics['Monotonicity']:.2f}, Coverage: {metrics['Coverage']:.2f}")
 
     metrics_json = json.dumps(metrics)
     
-    # write the JSON string to a file
-    with open('metrics.json', 'w') as f:
+    # write the JSON string to a file in the "../results" directory
+    with open(f'../results/{model_path}_eval_metrics.json', 'w') as f:
         f.write(metrics_json)
+
 
 def get_args():
     parser = argparse.ArgumentParser(description='Evaluation script')
     parser.add_argument('model_path', type=str, help='Path to the trained model')
     parser.add_argument('evaluation_data_path', type=str, help='Path to the evaluation data')
-    parser.add_argument('decoding', type=str, choices=['max', 'dtw'], help='Decoding method to use on cross-attention alignment matrix')
-    parser.add_argument('tolerance', type=float, help='Tolerance threshold for alignment distance. Minimum threshold is the MIDI score event duration / 2')
+    parser.add_argument('decoding', type=str, default='dtw', choices=['max', 'dtw'], help='Decoding method to use on cross-attention alignment matrix')
+    parser.add_argument('tolerance', type=float, default=EVENT_RESOLUTION / 2, help='Tolerance threshold for alignment distance. Default / minimum threshold is half the MIDI score event resolution, defined as the duration of a single event marker in the score.')
     args = parser.parse_args()
     return args
 
