@@ -12,6 +12,7 @@ import os
 from ..utils.constants import *
 from .score_tools import ParsedMIDI
 from .audio_tools import load_spectrogram, unfold_spectrogram, sample_interval, get_num_frames
+from .dataset_preprocessing_tools import generate_splits
 
 import numpy as np
 
@@ -266,6 +267,42 @@ class MaestroDataset(AlignDataset):
                 )
             metadata['n_frames'] = ns_frames
             metadata.to_csv(os.path.join(root_dir, "maestro-v3.0.0.csv"), index=False)
+
+        metadata_split = metadata[metadata['split'] == split]
+
+        ids = list(metadata_split.index)
+        midi_uris = list(metadata_split['midi_filename'].apply(
+                lambda filename: os.path.join(root_dir, filename)))
+        audio_uris = list(metadata_split['audio_filename'].apply(
+                lambda filename: os.path.join(root_dir, filename)))
+        ns_frames = list(metadata_split['n_frames'])
+        assert len(ids) == len(midi_uris) == len(audio_uris) == len(ns_frames)
+
+        super().__init__(midi_uris, audio_uris, split, shuffle, ids, ns_frames)
+
+class MusicNetDataset(AlignDataset):
+
+    def __init__(self,
+                 root_dir: str,
+                 split: Literal['train', 'validation', 'test'],
+                 shuffle: bool = False,
+                 start_at: int = 0):
+        assert split in {'train', 'validation', 'test'}
+        metadata = pd.read_csv(os.path.join(root_dir, "musicnet_metadata.csv"))
+
+        if 'split' not in metadata.columns:
+            metadata = generate_splits(metadata, 75, 10, 15)
+            metadata.to_csv(os.path.join(root_dir, "musicnet_metadata.csv"), index=False)
+
+        if 'n_frames' not in metadata.columns:
+            print("Preprocessing...")
+            ns_frames = []
+            for id_ in tqdm(metadata['id']):
+                ns_frames.append(
+                    get_num_frames(os.path.join(root_dir, f"{split}_labels/{id_}.wav"))
+                )
+            metadata['n_frames'] = ns_frames
+            metadata.to_csv(os.path.join(root_dir, "musicnet_metadata.csv"), index=False)
 
         metadata_split = metadata[metadata['split'] == split]
 
