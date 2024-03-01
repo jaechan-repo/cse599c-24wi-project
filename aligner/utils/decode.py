@@ -69,4 +69,3 @@ def DTW(Y_pred: torch.Tensor) -> torch.Tensor:
                 j -= 1
 
     return dtw_path.squeeze(0)
-

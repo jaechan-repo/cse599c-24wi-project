@@ -61,7 +61,7 @@ def temporal_distance(
 
     return torch.mean(threshold_distances)
 
-
+'''
 def temporal_distance_vec(
         Y_pred: torch.Tensor, 
         Y: torch.Tensor,
@@ -99,7 +99,7 @@ def temporal_distance_vec(
         return torch.mean(avg_distance_per_sample)
     elif reduction == 'none':
         return avg_distance_per_sample
-
+'''
 
 def binary_accuracy(
         Y_pred: torch.Tensor, 
@@ -128,7 +128,7 @@ def binary_accuracy(
     binary_accuracies = (torch.abs(pred_timestamps - true_timestamps) <= tolerance).float()
     return torch.mean(binary_accuracies)
 
-
+'''
 def binary_accuracy_vec(
         Y_pred: torch.Tensor, 
         Y: torch.Tensor, 
@@ -166,7 +166,7 @@ def binary_accuracy_vec(
         return torch.mean(mean_acc_per_sample)
     elif reduction == 'none':
         return mean_acc_per_sample
-
+'''
 
 def monotonicity(Y_pred: torch.Tensor) -> bool:
     """Compute the monotonicity of the predicted alignment matrix.
@@ -181,7 +181,7 @@ def monotonicity(Y_pred: torch.Tensor) -> bool:
     pred_indices = torch.argmax(Y_pred, dim=0)
     return torch.all(pred_indices[1:] >= pred_indices[:-1]).float()
 
-
+'''
 def monotonicity_vec(
         Y_pred: torch.Tensor, 
         reduction: str = 'none'
@@ -204,23 +204,28 @@ def monotonicity_vec(
         return torch.mean(monotonicity_per_sample)
     elif reduction == 'none':
         return monotonicity_per_sample
+'''
 
-
-def score_coverage(Y_pred: torch.Tensor) -> float:
+def score_coverage(Y_pred: torch.Tensor, Y: torch.Tensor) -> float:
     """Compute the score-wise alignment coverage of the predicted alignment matrix.
+    This metric gives the percentage of ground-truth MIDI events that are aligned to at least one audio frame.
 
     Args:
         Y_pred (torch.Tensor): Predicted binary alignment matrix of shape (E, X), where E is the number of MIDI events in the score and X is the number of audio frames.
+        Y (torch.Tensor): Ground truth binary alignment matrix of shape (E, X).
 
     Returns:
         float: Score-wise alignment coverage.
     """
 
-    events_covered = (Y_pred.sum(dim=1) > 0).float()
+    pred_indices = torch.argmax(Y_pred, dim=0)
+    true_indices = torch.argmax(Y, dim=0)
 
-    return torch.mean(events_covered)
+    # get percentage of unique true indices that are covered by predicted indices
+    events_covered = (torch.unique(pred_indices).unsqueeze(0) == torch.unique(true_indices).unsqueeze(1)).any(dim=0).float().mean()    
+    return events_covered
 
-
+'''
 def score_coverage_vec(Y_pred: torch.Tensor, reduction: str = 'none') -> float:
     """Compute the score-wise alignment coverage of the predicted alignment matrix.
 
@@ -238,4 +243,4 @@ def score_coverage_vec(Y_pred: torch.Tensor, reduction: str = 'none') -> float:
         return torch.mean(percent_covered_per_sample)
     elif reduction == 'none':
         return percent_covered_per_sample
-
+'''

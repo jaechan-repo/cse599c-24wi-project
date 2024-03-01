@@ -78,8 +78,7 @@ def evaluate(
         total_distance += temporal_distance(Y_pred_binary, Y, score_event_timestamps, tolerance)
         total_accuracy += binary_accuracy(Y_pred_binary, Y, score_event_timestamps, tolerance)
         total_monotonicity += monotonicity(Y_pred_binary)
-        total_coverage += score_coverage(Y_pred_binary)
-
+        total_coverage += score_coverage(Y_pred_binary, Y)
 
     # organize metrics into a dictionary
     metrics = {
@@ -111,7 +110,10 @@ def main():
     
     metrics = evaluate(model, dataloader, decoding, tolerance)
     
-    print(f"Evaluation Metrics with Tau={tolerance}\nLoss: {metrics['Loss']:.2f}, Distance: {metrics['Distance']:.2f}, Accuracy: {metrics['Accuracy']:.2f}, Monotonicity: {metrics['Monotonicity']:.2f}, Coverage: {metrics['Coverage']:.2f}")
+    # print evaluation metrics
+    print(f"Evaluation Metrics with tolerance={tolerance}")
+    for key, value in metrics.items():
+        print(f"{key}: {value:.2f}")
 
     metrics_json = json.dumps(metrics)
     
