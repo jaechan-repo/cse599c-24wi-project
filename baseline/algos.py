@@ -9,53 +9,72 @@ sys.path.append('..')
 from aligner.utils.constants import SAMPLE_RATE, HOP_LENGTH, AUDIO_RESOLUTION, N_FFT
 
 
-def align_chroma(score_fp, audio_fp, audio_start, duration):
+def align_chroma(score_fp, audio_fp, audio_start, duration, score_start, score_end, alignment_type):
     """Align a score and audio file using chroma features.
     
     Args:
         score_fp (str): Filepath to the .midi score file.
         audio_fp (str): Filepath to the .wav audio file.
         audio_start (int): Starting timestamp in seconds of the audio clip to align.
-        duration (int): Duration in seconds of the audio clip to align."""
+        duration (int): Duration in seconds of the audio clip to align.
+        score_start (int): Starting frame of the score section to align.
+        score_end (int): Ending frame of the score section to align.
+        alignment_type (str): Type of alignment to perform. Options are 'clip-to-whole', 'clip-to-clip', 'whole-to-whole'."""
 
     score_synth = pretty_midi.PrettyMIDI(score_fp).fluidsynth(fs=SAMPLE_RATE)
+
     perf,_ = librosa.load(audio_fp, sr=SAMPLE_RATE, offset=audio_start, duration=duration)
     score_chroma = librosa.feature.chroma_stft(y=score_synth, sr=SAMPLE_RATE, tuning=0, norm=2,
                                                hop_length=HOP_LENGTH, n_fft=N_FFT)
+    
+    # extract portion of score to align
+    score_chroma = score_chroma[:, score_start:score_end]
+
     score_logch = librosa.power_to_db(score_chroma, ref=score_chroma.max())
     perf_chroma = librosa.feature.chroma_stft(y=perf, sr=SAMPLE_RATE, tuning=0, norm=2,
                                               hop_length=HOP_LENGTH, n_fft=N_FFT)
     perf_logch = librosa.power_to_db(perf_chroma, ref=perf_chroma.max())
     
-    alignment = dtw(perf_logch, score_logch, keep_internals=False, open_begin=True, open_end=True)
+    open_begin = open_end = True if alignment_type == 'clip-to-whole' else False
+
+    alignment = dtw(perf_logch, score_logch, keep_internals=False, open_begin=open_begin, open_end=open_end)
     wp = np.array(list(zip(alignment.index1, alignment.index2)))
 
     return wp
 
 
-def align_spectra(score_fp, audio_fp, audio_start, duration):
+def align_spectra(score_fp, audio_fp, audio_start, duration, score_start, score_end, alignment_type):
     """Align a score and audio file using spectra features.
     
     Args:
         score_fp (str): Filepath to the .midi score file.
         audio_fp (str): Filepath to the .wav audio file.
         audio_start (int): Starting timestamp in seconds of the audio clip to align.
-        duration (int): Duration in seconds of the audio clip to align."""
+        duration (int): Duration in seconds of the audio clip to align.
+        score_start (int): Starting frame of the score section to align.
+        score_end (int): Ending frame of the score section to align.
+        alignment_type (str): Type of alignment to perform. Options are 'clip-to-whole', 'clip-to-clip', 'whole-to-whole'."""
 
     score_synth = pretty_midi.PrettyMIDI(score_fp).fluidsynth(fs=SAMPLE_RATE)
     perf,_ = librosa.load(audio_fp, sr=SAMPLE_RATE, offset=audio_start, duration=duration)
     score_spec = np.abs(librosa.stft(y=score_synth, hop_length=HOP_LENGTH, n_fft=N_FFT))**2
+
+    # extract portion of score to align
+    score_spec = score_spec[:, score_start:score_end]
+    
     score_logspec = librosa.power_to_db(score_spec, ref=score_spec.max())
     perf_spec = np.abs(librosa.stft(y=perf, hop_length=HOP_LENGTH, n_fft=N_FFT))**2
     perf_logspec = librosa.power_to_db(perf_spec, ref=perf_spec.max())
 
-    alignment = dtw(perf_logspec, score_logspec, keep_internals=False, open_begin=True, open_end=True)
+    open_begin = open_end = True if alignment_type == 'clip-to-whole' else False
+
+    alignment = dtw(perf_logspec, score_logspec, keep_internals=False, open_begin=open_begin, open_end=open_end)
     wp = np.array(list(zip(alignment.index1, alignment.index2)))
 
     return wp
 
 
-def align_prettymidi(score_fp, audio_fp, start_time, duration, note_start=36, n_notes=48, penalty=None):
+def align_prettymidi(score_fp, audio_fp, start_time, duration, score_start, score_end, alignment_type, note_start=36, n_notes=48, penalty=None):
     '''Align a MIDI object in-place to some audio data.
     
     Args:
@@ -63,10 +82,14 @@ def align_prettymidi(score_fp, audio_fp, start_time, duration, note_start=36, n_
         audio_data (np.ndarray): Samples of some audio data
         audio_start (int): Starting timestamp in seconds of the audio clip to align.
         duration (int): Duration in seconds of the audio clip to align.
+        score_start (int): Starting frame of the score section to align.
+        score_end (int): Ending frame of the score section to align.
+        alignment_type (str): Type of alignment to perform. Options are 'clip-to-whole', 'clip-to-clip', 'whole-to-whole'.
         note_start (int): Lowest MIDI note number for CQT
         n_notes (int): Number of notes to include in the CQT
         penalty (float): DTW non-diagonal move penalty'''
-    
+    return NotImplementedError
+    """
     def extract_cqt(audio_data, note_start, n_notes):
         # Compute CQT
         cqt = librosa.cqt(
@@ -97,4 +120,4 @@ def align_prettymidi(score_fp, audio_fp, start_time, duration, note_start=36, n_
     
     alignment = dtw(distance_matrix, keep_internals=False, open_begin=True, open_end=True)
     wp = np.array(list(zip(alignment.index1, alignment.index2)))
-    return wp
+    return wp"""
