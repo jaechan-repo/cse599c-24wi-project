@@ -1,0 +1,43 @@
+{
+    "_comment": "Set root_folder to none if you want to use absolute paths for all the path arguments!",
+    "root_dir": "/mmfs1/gscratch/ark/chan0369/projects/cse599c-24wi-project",
+    "trainer_config": {
+        "options": {
+            "save_every_unit": ["epoch", "step"],
+            "loss": ["cross_entropy",
+                     "emd_loss",
+                     "structured_perceptron_loss",
+                     "custom_loss"],
+            "normalization": ["none", "dtw"],
+            "accelerator": ["gpu", "cpu"]
+        },
+        "save_to_dir": "runs/v0/run01/01",
+        "load_from_dir": "runs/v0/run01/00",
+        "batch_size": 16,
+        "learning_rate": 1e-6,
+        "loss": "custom_loss",
+        "data_dir": "data/maestro-v3.0.0",
+        "save_every": 1,
+        "save_every_unit": "epoch",
+        "normalization": "none",
+        "overfit": 0,
+        "accelerator": "gpu",
+        "seed": 42,
+        "max_epochs": -1,
+        "gradient_clip_val": 1.0,
+        "detect_anomaly": false
+    },
+    "model_config": {
+        "vocab_size": 131,
+        "d_score": 64,
+        "n_heads_score": 4,
+        "attn_dropout_score": 0.1,
+        "ffn_dropout_score": 0.1,
+        "n_layers_score": 4,
+        "d_audio": 128,
+        "n_heads_audio": 8,
+        "attn_dropout_audio": 0.1,
+        "ffn_dropout_audio": 0.1,
+        "n_layers_audio": 4
+    }
+}

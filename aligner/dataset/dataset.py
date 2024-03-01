@@ -19,7 +19,7 @@ import math
 from tqdm import tqdm
 
 
-class AlignDataset(IterableDataset):
+class AlignerDataset(IterableDataset):
     """
     Note 1: If you want to shuffle, pass `shuffle = True` in the initialization.
     Shuffling outside of this class definition (e.g., as in DataLoader) is HIGHLY
@@ -35,24 +35,35 @@ class AlignDataset(IterableDataset):
         clip_idx: int
         audio_frames: Tensor
         score_ids: LongTensor
-        score_attn_mask: BoolTensor
+        local_event_attn_mask: BoolTensor
+        global_event_attn_mask: BoolTensor
         score_to_event: BoolTensor
         event_pos: LongTensor
         Y: BoolTensor
 
-    class ItemWithMetadata(Item):
-        audio: Tensor
-        events: List[int]
+
+    class ItemWithMetadata(NamedTuple):
+        id_: Tuple[int, int]
+        clip_idx: int
+        audio_frames: Tensor
+        score_ids: LongTensor
+        local_event_attn_mask: BoolTensor
+        global_event_attn_mask: BoolTensor
+        score_to_event: BoolTensor
+        event_pos: LongTensor
+        Y: BoolTensor
+        ### TODO: Add more as demanded. ###
         audio_resolution: int
         event_resolution: int
-        audio_frame_interval: Tuple[int, int]
-        event_interval: Tuple[int, int]
+        event_timestamps: Tensor
+
 
     class Batch(NamedTuple):
         id_: List[Tuple[int, int]]
         audio_frames: Tensor                # (B, N_FRAMES_PER_CLIP, N_MELS)
         score_ids: LongTensor               # (B, max_n_tokens)
-        score_attn_mask: BoolTensor         # (B, max_n_tokens, max_n_tokens)
+        local_event_attn_mask: BoolTensor
+        global_event_attn_mask: BoolTensor
         score_to_event: BoolTensor          # (B, max_n_events, max_n_tokens)
         event_pos: List[LongTensor]         # (B) * (n_events,)
         event_padding_mask: BoolTensor      # (B, max_n_events)
@@ -66,9 +77,28 @@ class AlignDataset(IterableDataset):
                  shuffle: bool = False,
                  ids: Sequence | None = None,
                  ns_frames: Sequence[int] | None = None,
-                 start_at: int = 0  # For fault tolerance
+                 include_null_events: bool = False,
+                 start_at: int = 0,  # For fault tolerance
                  ):
+        """Initilizes the alignment dataset.
 
+        Args:
+            midi_uris (Sequence[str]): midi uris. *.mid, *.midi.
+            audio_uris (Sequence[str]): audio uris. *.wav, *.mp3.
+                                        Must be of the same length as `midi_uris`.
+            split (str): train / validation / test.
+            shuffle (bool, optional): Randomly shuffles the data. False by default.
+            ids (Sequence | None): List of unique identifiers. Must be of the same length
+                                   as `midi_uris` and `audio_uris`.
+            ns_frames (Sequence[int] | None): Number of audio frames in each audio file.
+            include_null_events (bool, optional): Whether to include the null events. Defaults to False.
+            start_at (int, optional): Starting index for the debugging / fault tolerance
+                                      purpose. Defaults to 0.
+        """
+        if include_null_events:
+            assert '[NULL]' in TOKEN_ID, "Add [NULL] to your vocabulary."
+
+        self.include_null_events = include_null_events
         self.start_at = start_at
         self.n_uris = len(midi_uris)
         assert len(audio_uris) == self.n_uris
@@ -89,7 +119,7 @@ class AlignDataset(IterableDataset):
         if ns_frames is None:
             print("Preprocessing...")
 
-        self.data: List[Tuple] = []     # (id_, midi_uri, audio_uri, clip_idx)\
+        self.data: List[Tuple] = []     # (id_, midi_uri, audio_uri, clip_idx)
         for i in range(self.n_uris):
 
             id_, midi_uri, audio_uri = ids[i], midi_uris[i], audio_uris[i]
@@ -124,57 +154,42 @@ class AlignDataset(IterableDataset):
             self.curr_id_ = id_
             audio = load_spectrogram(audio_uri)
             self.curr_audio_clips = unfold_spectrogram(audio)
-            self.curr_midi = ParsedMIDI(midi_uri, lazy_align=True)
+            self.curr_midi = ParsedMIDI(midi_uri, lazy_align=True)   # TODO
 
         midi, audio_clips = self.curr_midi, self.curr_audio_clips
 
-        # Audio frame interval, [afi1, afi2).
-        # INCLUSIVE on the left, EXCLUSIVE on the right.
+        # Audio frame interval, [afi1, afi2)
         afi1 = clip_idx * N_FRAMES_PER_STRIDE
         afi2 = afi1 + N_FRAMES_PER_CLIP
 
-        # Event interval corresponding to [afi1, afi2).
-        # This is the most MINIMAL interval of events that covers the span of
-        # audio from afi1 to afi2.
-        ei1, ei2 = midi.find_minimal_event_interval_covering(afi1, afi2)
-        n_tokens = midi.ei2toki(ei2) - midi.ei2toki(ei1)
+        # Event interval, [ei1, ei2)
+        ei1, ei2 = midi.sample_event_interval(afi1, afi2,
+                                              random_sample=self.split == 'train',
+                                              include_null=self.include_null_events)
 
-        # Search for a larger event interval
-        # if this minimal event interval doesn't exceed MAX_N_TOKENS.
-        if n_tokens <= MAX_N_TOKENS:
-            # [min_ei1, max_ei2) is the MAXIMAL event interval
-            # such that the interval length doesn't exceed MAX_N_TOKENS.
-            min_ei1, max_ei2 = midi.find_maximal_event_interval_covering(ei1, ei2, MAX_N_TOKENS)
-            assert 1 <= midi.ei2toki(max_ei2) - midi.ei2toki(min_ei1) <= MAX_N_TOKENS
+        Y = midi.align(afi1, afi2, ei1, ei2, include_null=self.include_null_events)
 
-            if self.split == 'train':
-                # If the split is train, randomly sample an event interval
-                # between the minimal and maximal intervals.
-                ei1, ei2 = sample_interval(min_ei1, ei1, ei2, max_ei2)
-            else:
-                # Otherwise, take the maximal interval.
-                ei1, ei2 = min_ei1, max_ei2
-
-        Y = midi.align(afi1, afi2, ei1, ei2)
-        item = AlignDataset.Item(id_=id_,
+        item = AlignerDataset.Item(id_=id_,
                                  clip_idx=clip_idx, 
                                  audio_frames=audio_clips[clip_idx],
                                  Y=Y,
-                                 **(midi.encode(ei1, ei2)._asdict()))
+                                 **(midi.encode(ei1, ei2,
+                                                include_null=self.include_null_events
+                                                )._asdict()))
 
         if self.split == 'test':
-            item = AlignDataset.ItemWithMetadata(audio_uri=audio_uri,
-                                                 audio_resolution=AUDIO_RESOLUTION,
-                                                 audio_frame_interval=(afi1, afi2),
-                                                 midi_uri=midi_uri,
-                                                 events=midi.get_frame_indices(),
-                                                 event_resolution=EVENT_RESOLUTION,
-                                                 event_interval=(ei1, ei2),
-                                                 **item._asdict())
+            event_frame_indices = midi.get_frame_indices()[ei1: ei2]
+            event_timestamps = torch.tensor(
+                [AUDIO_RESOLUTION * fi for fi in event_frame_indices]
+            )
+            item = AlignerDataset.ItemWithMetadata(audio_resolution=AUDIO_RESOLUTION,
+                                                   event_resolution=EVENT_RESOLUTION,
+                                                   event_timestamps=event_timestamps,
+                                                   **item._asdict())
         return item
 
 
-    def __iter__(self) -> Iterator[Item]:
+    def __iter__(self) -> Iterator[Item | ItemWithMetadata]:
         for idx in range(self.start_at, self.__len__()):
             self.idx = idx
             yield self.__getitem__(idx)
@@ -193,66 +208,98 @@ class AlignDataset(IterableDataset):
         # score_ids
         tensors = [item.score_ids for item in batch]
         max_n_tokens = max(len(t) for t in tensors)
-        score_ids: LongTensor = torch.stack(
-            [F.pad(t, (0, max_n_tokens-len(t)), value=TOKEN_ID['[PAD]']) for t in tensors])
+        score_ids: LongTensor = torch.stack([
+            F.pad(t, (0, max_n_tokens-len(t)), value=TOKEN_ID['[PAD]'])
+            for t in tensors
+        ])
         assert score_ids.shape == (batch_size, max_n_tokens)
 
-        # score_attn_mask
-        tensors = [item.score_attn_mask for item in batch]
-
-        # Prevent non-padding queries from attending to padding keys
-        score_attn_mask = [
-            F.pad(t, (0, max_n_tokens-t.size(1)), value=False)
+        # local_event_attn_mask
+        tensors = [item.local_event_attn_mask for item in batch]
+        local_event_attn_mask = torch.stack([
+            F.pad(t, (0, max_n_tokens - t.size(1), 0, max_n_tokens - t.size(0)), value=False)
             for t in tensors
-        ]
-        # Allow padding keys to attend to anything (doesn't matter)
-        score_attn_mask: BoolTensor = torch.stack([
-            F.pad(t, (0, 0, 0, max_n_tokens-t.size(0)), value=True) 
-            for t in score_attn_mask
         ])
-        assert score_attn_mask.shape == (batch_size, max_n_tokens, max_n_tokens)
+        local_event_attn_mask[:, torch.arange(max_n_tokens), torch.arange(max_n_tokens)] = True
+
+        # global_event_attn_mask
+        tensors = [item.global_event_attn_mask for item in batch]
+        global_event_attn_mask = torch.stack([
+            F.pad(t, (0, max_n_tokens - t.size(1), 0, max_n_tokens - t.size(0)), value=False)
+            for t in tensors
+        ])
+        global_event_attn_mask[:, torch.arange(max_n_tokens), torch.arange(max_n_tokens)] = True
 
         # event_pos
         event_pos = [item.event_pos for item in batch]
         max_n_events = max(len(t) for t in event_pos)
 
         # event_padding_mask
-        tensors = [torch.ones(len(t), dtype=torch.bool) for t in event_pos]
+        tensors = [
+            torch.ones(len(t), dtype=torch.bool)
+            for t in event_pos
+        ]
         event_padding_mask: BoolTensor = torch.stack([
-            F.pad(t, (0, max_n_events-len(t)), value=False) for t in tensors])
+            F.pad(t, (0, max_n_events - len(t)), value=False)
+            for t in tensors
+        ])
         assert event_padding_mask.shape == (batch_size, max_n_events)
 
         # score_to_events
         tensors = [item.score_to_event for item in batch]
         score_to_event: BoolTensor = torch.stack([
-            F.pad(t, (0, max_n_tokens - t.size(1), 0, max_n_events - t.size(0)),
-            value=False) for t in tensors])
+            F.pad(t, (0, max_n_tokens - t.size(1), 0, max_n_events - t.size(0)), value=False)
+            for t in tensors
+        ])
         assert score_to_event.shape == (batch_size, max_n_events, max_n_tokens)
 
         # Y
         tensors = [item.Y for item in batch]
         Y: BoolTensor = torch.stack([
-            F.pad(t, (0, max_n_events-t.size(1)), value=False
-            ) for t in tensors])
+            F.pad(t, (0, max_n_events - t.size(1)), value=False)
+            for t in tensors
+        ])
         assert Y.shape == (batch_size, N_FRAMES_PER_CLIP, max_n_events)
 
-        return AlignDataset.Batch(
+        return AlignerDataset.Batch(
             id_=id_,
             audio_frames=audio_frames,
             score_ids=score_ids,
-            score_attn_mask=score_attn_mask,
+            local_event_attn_mask=local_event_attn_mask,
+            global_event_attn_mask=global_event_attn_mask,
             score_to_event=score_to_event,
             event_pos=event_pos,
             event_padding_mask=event_padding_mask,
             Y=Y)
 
 
-class MaestroDataset(AlignDataset):
+    @staticmethod
+    def to_device(item: Item | ItemWithMetadata | Batch,
+                  device: Literal['cpu', 'cuda'] = 'cpu'
+                  ) -> Item | ItemWithMetadata | Batch:
+
+        entries = item._asdict()
+        for k, v in entries.items():
+            if torch.is_tensor(v):
+                entries[k] = v.to(device)
+
+        if isinstance(item, AlignerDataset.ItemWithMetadata):
+            return AlignerDataset.ItemWithMetadata(**entries)
+        if isinstance(item, AlignerDataset.Item):
+            return AlignerDataset.Item(**entries)
+        if isinstance(item, AlignerDataset.Batch):
+            return AlignerDataset.Batch(**entries)
+        raise ValueError
+
+
+
+class MaestroDataset(AlignerDataset):
 
     def __init__(self,
                  root_dir: str,
                  split: Literal['train', 'validation', 'test'],
                  shuffle: bool = False,
+                 include_null_events: bool = False,
                  start_at: int = 0):
         assert split in {'train', 'validation', 'test'}
         metadata = pd.read_csv(os.path.join(root_dir, "maestro-v3.0.0.csv"))
@@ -277,4 +324,7 @@ class MaestroDataset(AlignDataset):
         ns_frames = list(metadata_split['n_frames'])
         assert len(ids) == len(midi_uris) == len(audio_uris) == len(ns_frames)
 
-        super().__init__(midi_uris, audio_uris, split, shuffle, ids, ns_frames)
+        super().__init__(midi_uris, audio_uris,
+                         split, shuffle, ids, ns_frames,
+                         include_null_events, start_at)
+

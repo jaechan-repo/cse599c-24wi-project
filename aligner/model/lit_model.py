@@ -1,15 +1,17 @@
 import torch
 from torch.optim import AdamW
+from ..utils.scheduler import CosineAnnealingWarmupRestarts, LinearWarmupCosineAnnealingLR
 from torch.utils.data import DataLoader
 from torch import Tensor
 import pytorch_lightning as pl
 
-from ..dataset import MaestroDataset
+from ..dataset import MaestroDataset, Batch
+from ..inference.metrics import monotonicity, compute_metrics
 from aligner.utils.constants import *
 from aligner.model import AlignerModel, ModelConfig
 from aligner.utils.constants import *
 
-from typing import NamedTuple, Optional, Literal
+from typing import NamedTuple, Literal
 import gc
 
 
@@ -17,10 +19,12 @@ class LitModelConfig(NamedTuple):
     data_dir: str
     learning_rate: float
     batch_size: int
-    nm_penalty: Optional[float] = None
     num_dataloader_workers: int = 0
     alpha_cls: float = 1.0
     start_at: int = 0
+    normalization: Literal['none', 'dtw'] = 'none'
+    loss: str = 'cross_entropy'
+    shuffle_train: bool = True
 
 
 class AlignerLitModel(pl.LightningModule):
@@ -34,152 +38,80 @@ class AlignerLitModel(pl.LightningModule):
         self.save_hyperparameters()
         self.train_dataset = MaestroDataset(self.config.data_dir,
                                             split='train',
-                                            shuffle=True,
-                                            start_at=self.config.start_at)
+                                            shuffle=True)
         self.val_dataset = MaestroDataset(self.config.data_dir,
                                           split='validation')
 
 
-    @staticmethod
-    def metric_NM(Y_hat: torch.Tensor) -> float:
-        pred_indices = torch.argmax(Y_hat, dim=-1)
-        diffs = pred_indices[:, 1:] - pred_indices[:, :-1]
-        return torch.mean(torch.any(diffs < 0, dim=-1).float(), dim=-1)
-
-
-    @staticmethod
-    def metric_MAE(Y_hat: Tensor,
-                   Y: Tensor,
-                   reduction: Literal['mean', 'none'] = 'mean',
-                   beta: float = 0.5
-                   ) -> Tensor | float:
-        assert Y_hat.shape == Y.shape
-        max_n_events = Y.shape[-1]
-
-        y = Y.argmax(dim=-1).unsqueeze(-1).float()
-        x = torch.arange(max_n_events).view(1,1,-1).type_as(y)
-
-        # Recall Beta = 0.5.
-        # Since x and y are discrete, smoothing is only applied
-        # when x exactly equals y.
-        is_smooth = torch.abs(x - y) < beta
-        dist = (0.5 * (x - y) ** 2 / beta) * is_smooth \
-             + (torch.abs(x - y) - 0.5 * beta) * ~is_smooth
-
-        loss = Y_hat * dist             # weighted L1
-        if reduction == 'none':
-            return loss
-        if reduction == 'mean':
-            loss = loss.sum(dim=-1)     # weighted sum over the event axis
-            loss = loss.mean()          # average everything else
-            return loss
-        raise ValueError
-
-
-    @staticmethod
-    def metric_RMSE(Y_hat: Tensor,
-                    Y: Tensor,
-                    reduction: Literal['sqrt', 'none'] = 'sqrt',
-                    eps: float = 1e-9
-                    ) -> Tensor | float:
-
-        assert Y_hat.shape == Y.shape
-        max_n_events = Y.shape[-1]
-
-        y = Y.argmax(dim=-1).unsqueeze(-1).float()
-        x = torch.arange(max_n_events).view(1,1,-1).type_as(y)
-
-        dist = (x - y) ** 2
-        loss = Y_hat * dist             # weighted L2
-
-        if reduction == 'none':
-            return loss
-        if reduction == 'sqrt':
-            loss = loss.sum(dim=-1)     # weighted sum over the event axis
-            loss = torch.sqrt(loss + eps)
-            return loss.mean()          # mean over the frame & batch axes
-        raise ValueError
-
-
-    @staticmethod
-    def metric_CE(Y_hat: Tensor, Y: Tensor,
-                  reduction: Literal['mean', 'none'] = 'mean',
-                  eps=1e-12
-                  ) -> Tensor | float:
-        """Classification loss
-        """
-        target = Y.argmax(dim=-1)
-        loss = -torch.log(Y_hat + eps)[:,:,target]  # NLL
-        if reduction == 'none':
-            return loss
-        elif reduction == 'mean':
-            return loss.mean()
-        raise ValueError
-
-
     def criterion(self,
                   Y_hat: Tensor,
-                  batch: MaestroDataset.Batch
+                  batch: Batch
                   ) -> float:
-        mse_loss = AlignerLitModel.metric_RMSE(Y_hat, batch.Y.float())
-        cls_loss = AlignerLitModel.metric_CE(Y_hat, batch.Y.float())
-        return {
-            'mse_loss': mse_loss,
-            'cls_loss': cls_loss,
-            'loss': mse_loss,
-            'nm': AlignerLitModel.metric_NM(Y_hat)
-        }
+        Y = batch.Y.float()
+        n_events = batch.event_padding_mask.float().sum(dim=-1)
+        metrics = compute_metrics(Y_hat, Y, n_events)
+        return metrics
 
 
     def forward(self, *args, **kwargs) -> Tensor:
-        return self.model(*args, **kwargs)
+        return self.model(*args, **kwargs,
+                          normalization=self.config.normalization)
 
 
-    def training_step(self, batch: MaestroDataset.Batch, **_):
+    def training_step(self, batch: Batch, **_):
         Y_hat = self.forward(**batch._asdict())
         metrics = self.criterion(Y_hat, batch)
-        loss = metrics['mse_loss'] + self.config.alpha_cls * metrics['cls_loss']
-
-        # Monotonicity constraint
-        if self.config.nm_penalty is not None and metrics['nm'] != 0:
-            loss *= self.config.nm_penalty * metrics['nm']
-
         self.log_dict({
-                'train_loss': loss,
-                'train_mse_loss': metrics['mse_loss'],
-                'train_cls_loss': metrics['cls_loss'],
-                'non_monotonicity': metrics['nm'],
-                'sample_idx': self.train_dataset.idx
-            }, 
+                'train_loss': metrics[self.config.loss],
+                'train_cross_entropy': metrics['cross_entropy'],
+                # 'train_rmse_loss': metrics['rmse_loss'],
+                # 'train_rmse_loss_normalized': metrics['rmse_loss_normalized'],
+                'emd_loss': metrics['emd_loss'],
+                'structured_perceptron_loss': metrics['structured_perceptron_loss'],
+                'train_monotonicity': metrics['monotonicity'],
+                'train_sample_idx': self.train_dataset.idx
+            },
             on_step=True, on_epoch=False,
             sync_dist=True, batch_size=self.config.batch_size
         )
-
-        torch.cuda.empty_cache()
         gc.collect()
-        return loss
+        return metrics[self.config.loss]
 
 
     @torch.no_grad()
-    def validation_step(self, batch: MaestroDataset.Batch, **_):
+    def validation_step(self, batch: Batch, **_):
         Y_hat = self.forward(**batch._asdict())
         metrics = self.criterion(Y_hat, batch)
-        loss = metrics['mse_loss'] + self.config.alpha_cls * metrics['cls_loss']
         self.log_dict({
-                'val_loss': loss,
-                'val_mse_loss': metrics['mse_loss'],
-                'val_cls_loss': metrics['cls_loss'],
-                'val_non_monotonicity': metrics['nm'],
-                'sample_idx': self.val_dataset.idx
+                'val_loss': metrics[self.config.loss],
+                'val_monotonicity': metrics['monotonicity'],
+                'val_sample_idx': self.val_dataset.idx,
             },
             on_step=True, on_epoch=True,
             sync_dist=True, batch_size=self.config.batch_size
         )
-        return loss
+        return metrics[self.config.loss]
 
 
     def configure_optimizers(self):
-        return AdamW(self.model.parameters(), self.config.learning_rate)
+        optimizer = AdamW(self.model.parameters(), self.config.learning_rate)
+        # lr_scheduler = CosineAnnealingWarmupRestarts(optimizer,
+        #                                              first_cycle_steps=400,
+        #                                              max_lr=self.config.learning_rate,
+        #                                              min_lr=self.config.learning_rate/1e3,
+        #                                              warmup_steps=200,
+        #                                              )
+        lr_scheduler = LinearWarmupCosineAnnealingLR(optimizer,
+                                                     warmup_epochs=2000,
+                                                     max_epochs=200000,
+                                                     warmup_start_lr=self.config.learning_rate,
+                                                     eta_min=self.config.learning_rate / 1e3)
+        return {'optimizer': optimizer,
+                'lr_scheduler': {
+                    'scheduler': lr_scheduler,
+                    'interval': 'step',
+                    'frequency': 1,
+                }}
 
 
     def train_dataloader(self):

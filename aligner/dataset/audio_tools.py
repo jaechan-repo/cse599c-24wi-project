@@ -7,13 +7,6 @@ from ..utils.constants import *
 from random import randrange
 
 
-def get_duration(audio_uri: str) -> float:
-    # Load the audio file
-    waveform, sample_rate = torchaudio.load(audio_uri)
-    duration = waveform.shape[1] / sample_rate
-    return duration
-
-
 def t2fi(timestamp: float) -> int:
     return timestamp // AUDIO_RESOLUTION
 
