@@ -19,7 +19,6 @@ from aligner.utils.constants import AUDIO_RESOLUTION, N_FRAMES_PER_CLIP
 from baseline.algos import align_chroma, align_spectra, align_prettymidi
 
 
-# run baseline over test set
 def run_baseline(
     evaluation_data_path: torch.utils.data.Dataset, 
     align_method: Callable
@@ -34,41 +33,49 @@ def run_baseline(
     total_accuracy = 0
     total_coverage = 0
 
-    # Compute the DTW alignment for each test set
+    num_clips = 0
+
+    # loop through each (score, audio) pair in the test set
     loop = tqdm(dataloader)
     for item in tqdm(dataloader):
-        Y = item.Y.transpose(-2, -1) # (X, E) -> (E, X)
-        num_score_events = Y.shape[-2]
+        Y = item.Y.transpose(-2, -1).squeeze(0) # (X, E) -> (E, X)
+        num_score_events, num_audio_frames = Y.shape[-2:]
 
         score_fp = item.score_fp
         audio_fp = item.audio_fp
 
-        start_time = item.start_idx * AUDIO_RESOLUTION
-        duration = N_FRAMES_PER_CLIP * AUDIO_RESOLUTION
+        # loop thorugh each clip in the audio
+        for i in range(0, num_audio_frames, N_FRAMES_PER_CLIP):
+            start_time = i * AUDIO_RESOLUTION
+            end_time = min((i + N_FRAMES_PER_CLIP) * AUDIO_RESOLUTION, num_audio_frames * AUDIO_RESOLUTION)
+            duration = end_time - start_time
 
-        # Align the score and audio to get the warping path (wp)
-        wp = align_method(score_fp, audio_fp, start_time, duration)
+            # Align the score and audio to get the warping path (wp)
+            wp = align_method(score_fp, audio_fp, start_time, duration)
 
-        # construct the predicted alignment matrix
-        Y_pred = torch.zeros(Y.shape)
-        Y_pred[wp[:, 1], wp[:, 0]] = 1
+            # construct the predicted alignment matrix
+            Y_pred = torch.zeros(Y.shape)
+            Y_pred[wp[:, 1], wp[:, 0]] = 1
 
-        # construct the score event timestamps
-        # example: for a score of duration 100 ms and resolution 10 ms, we get
-        #   [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5]
-        score_event_timestamps = torch.Tensor([(i * AUDIO_RESOLUTION) + (AUDIO_RESOLUTION / 2) for i in range(num_score_events)])
+            # construct the score event timestamps
+            # example: for a score of duration 100 ms and resolution 10 ms, we get
+            #   [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5]
+            score_event_timestamps = torch.Tensor([(event * AUDIO_RESOLUTION) + (AUDIO_RESOLUTION / 2) for event in range(num_score_events)])
 
-        total_distance += temporal_distance(Y_pred, Y, score_event_timestamps, tolerance=AUDIO_RESOLUTION)
-        total_accuracy += binary_accuracy(Y_pred, Y, score_event_timestamps, tolerance=AUDIO_RESOLUTION)
-        total_coverage += score_coverage(Y_pred)
+            total_distance += temporal_distance(Y_pred, Y, score_event_timestamps, tolerance=AUDIO_RESOLUTION)
+            total_accuracy += binary_accuracy(Y_pred, Y, score_event_timestamps, tolerance=AUDIO_RESOLUTION)
+            total_coverage += score_coverage(Y_pred, Y)
 
-        loop.set_description(f'Distance: {total_distance / len(dataloader):.2f}, Acc: {total_accuracy / len(dataloader):.2f}, Coverage: {total_coverage / len(dataloader):.2f}')
+            num_clips += 1
+
+            loop.set_description(f'Distance: {total_distance / num_clips:.2f}, Acc: {total_accuracy / num_clips:.2f}, Coverage: {total_coverage / num_clips:.2f}')
+        
         loop.update(1)
     
     metrics = {
-        'Distance': total_distance / len(dataloader),
-        'Accuracy': total_accuracy / len(dataloader),
-        'Coverage': total_coverage / len(dataloader)
+        'Distance': total_distance / num_clips,
+        'Accuracy': total_accuracy / num_clips,
+        'Coverage': total_coverage / num_clips
     }
 
     return metrics
@@ -93,6 +100,7 @@ def main():
     metrics = run_baseline(evaluation_data_path, align_method)
 
     # Print the metrics
+    print(f'Baseline Metrics for {method} method:')
     for key, value in metrics.items():
         print(f'{key}: {value:.2f}')
     
