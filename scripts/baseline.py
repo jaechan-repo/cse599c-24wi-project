@@ -45,7 +45,7 @@ def run_baseline(
         # construct the score event timestamps
         # example: for a score of duration 100 ms and resolution 10 ms, we get
         #   [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5]
-        score_event_timestamps = torch.Tensor([(event_index * AUDIO_RESOLUTION) + (AUDIO_RESOLUTION / 2) for event_index in range(start_score, end_score)])
+        score_event_timestamps = torch.Tensor([(event_index * EVENT_RESOLUTION) + (EVENT_RESOLUTION / 2) for event_index in range(start_score, end_score)])
 
         # get the number of audio frames and score events to align
         amount_audio = N_FRAMES_PER_CLIP if (alignment_type == 'clip-to-clip' or alignment_type == 'clip-to-whole') else total_audio_frames
@@ -113,7 +113,7 @@ def main():
     metrics = run_baseline(evaluation_data_path, align_method, alignment_type)
 
     # Print the metrics
-    print(f'Baseline Metrics for {method} method:')
+    print(f'Baseline Metrics for {alignment_type} {method} alignment:')
     for key, value in metrics.items():
         print(f'{key}: {value:.2f}')
     
@@ -122,7 +122,7 @@ def main():
 
     # write the JSON string to a file in the "../results" directory
     metrics_json = json.dumps(metrics)
-    with open(f'../baseline_results/{method}_metrics.json', 'w') as f:
+    with open(f'../baseline_results/{alignment_type}_{method}_metrics.json', 'w') as f:
         f.write(metrics_json)
 
 
