@@ -87,14 +87,17 @@ def align_prettymidi(score_fp, audio_fp, start_time, duration, score_start, scor
         alignment_type (str): Type of alignment to perform. Options are 'clip-to-whole', 'clip-to-clip', 'whole-to-whole'.
         note_start (int): Lowest MIDI note number for CQT
         n_notes (int): Number of notes to include in the CQT
-        penalty (float): DTW non-diagonal move penalty'''
-    return NotImplementedError
-    """
+        penalty (float): DTW non-diagonal move penalty'''    
+    
     def extract_cqt(audio_data, note_start, n_notes):
-        # Compute CQT
+        # Compute CQT of shape (n_bins, timesteps)
         cqt = librosa.cqt(
             audio_data, sr=SAMPLE_RATE, hop_length=HOP_LENGTH,
             fmin=librosa.midi_to_hz(note_start), n_bins=n_notes)
+        
+        # TODO: extract portion of score to align
+        cqt = cqt[:, score_start:score_end]
+
         # Transpose so that rows are spectra
         cqt = cqt.T
         # Compute log-amplitude
@@ -117,7 +120,9 @@ def align_prettymidi(score_fp, audio_fp, start_time, duration, score_start, scor
     # Compute distance matrix; because the columns of the CQ-grams are
     # L2-normalized we can compute a cosine distance matrix via a dot product
     distance_matrix = 1 - np.dot(midi_gram, audio_gram.T)
+
+    open_begin = open_end = True if alignment_type == 'clip-to-whole' else False
     
-    alignment = dtw(distance_matrix, keep_internals=False, open_begin=True, open_end=True)
+    alignment = dtw(distance_matrix, keep_internals=False, open_begin=open_begin, open_end=open_end)
     wp = np.array(list(zip(alignment.index1, alignment.index2)))
-    return wp"""
+    return wp
