@@ -149,7 +149,7 @@ def monotonicity(Y_pred: torch.Tensor) -> bool:
     return torch.all(pred_indices[1:] >= pred_indices[:-1]).float()
 
 
-def motonicity_v2(Y_pred: torch.Tensor) -> float:
+def monotonicity_v2(Y_pred: torch.Tensor) -> float:
     """Compute the motoricity of the predicted alignment matrix.
 
     Args:
