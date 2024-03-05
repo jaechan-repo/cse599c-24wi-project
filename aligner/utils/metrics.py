@@ -1,5 +1,5 @@
 import torch
-
+from constants import AUDIO_RESOLUTION
 
 def compute_loss(
         Y_pred: torch.Tensor, 
@@ -76,7 +76,7 @@ def temporal_distance_v2(
             Ground truth binary alignment matrix of shape (E, X).
 
     Returns:
-        float: Average temporal alignment distance between Y_pred and Y.
+        float: Average element-wise temporal alignment distance between Y_pred and Y (in ms, according to audio-resolution).
     """
 
     # get the subscore of the gold alignment matrix with 1s
@@ -89,7 +89,7 @@ def temporal_distance_v2(
 
     L1_distances = torch.abs(pred_audio_indices - true_audio_indices).float()
 
-    return torch.mean(L1_distances)
+    return torch.mean(L1_distances) * AUDIO_RESOLUTION
 
 
 def binary_accuracy(
