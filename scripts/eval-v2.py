@@ -9,7 +9,7 @@ from typing import Literal, Tuple, Callable
 
 import sys
 sys.path.append('..')
-from aligner.utils.metrics import temporal_distance_v2, binary_accuracy_v2, monotonicity_v2, audio_coverage
+from aligner.utils.metrics import temporal_distance_v2, binary_accuracy_v2, monotonicity_v2, coverage
 from aligner.utils.decode import max_decode_v2, DTW_v2
 
 # TODO: update import below with the correct loss function
@@ -57,6 +57,7 @@ def evaluate(
     # Compute loss and metrics with batch size of 1
     for item in tqdm(dataloader):
 
+        # Get gold alignment matrix, with extra leading and trailing audio frame
         Y = item.Y.transpose(-2, -1) # (X, E) -> (E, X)
 
         # unsqueeze batch dimension to match model forward input shape
@@ -77,10 +78,14 @@ def evaluate(
         # decode soft cross-attn alignment matrix into binary alignment matrix
         Y_pred_binary = decoding(Y_pred)
 
+        # drop leading and trailing audio frame column of Y and Y_pred_binary to get aligned section
+        Y = Y[:, 1:-1]
+        Y_pred_binary = Y_pred_binary[:, 1:-1]
+
         total_distance += temporal_distance_v2(Y_pred_binary, Y)
         total_accuracy += binary_accuracy_v2(Y_pred_binary, Y)
         total_monotonicity += monotonicity_v2(Y_pred_binary)
-        total_coverage += audio_coverage(Y_pred_binary, Y)
+        total_coverage += coverage(Y_pred_binary, Y)
 
     # organize metrics into a dictionary
     metrics = {

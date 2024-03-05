@@ -65,22 +65,27 @@ def temporal_distance(
 def temporal_distance_v2(
         Y_pred: torch.Tensor, 
         Y: torch.Tensor, 
-        midi_event_timestamps: torch.Tensor, 
-        tolerance: float = 0.
     ) -> float:
     """Compute the audio-frame-wise temporal alignment distance between the predicted and ground-truth binary alignment matrices. This version allows an audio frame to be aligned to multiple MIDI events.
 
     Args:
-        Y_pred (torch.Tensor): Predicted binary alignment matrix of shape (E, X), where E is the number of MIDI events in the score and X is the number of audio frames.
-        Y (torch.Tensor): Ground truth binary alignment matrix of shape (E, X).
+        Y_pred (torch.Tensor)
+            Predicted binary alignment matrix of shape (E, X), where E is the number of MIDI events in the score and X is the number of audio frames. 
+            Y_pred is assumed to be decoded with dtw, such that each score event is aligned to at least one audio frame, with leading and trailing parts of the score not present in the audio being aligned to the first and last audio frames, respectively.
+        Y (torch.Tensor):
+            Ground truth binary alignment matrix of shape (E, X).
 
     Returns:
         float: Average temporal alignment distance between Y_pred and Y.
     """
 
-    # get audio frame alignment for each MIDI event
-    pred_audio_indices = torch.argmax(Y_pred, dim=1)
-    true_audio_indices = torch.argmax(Y, dim=1)
+    # get the subscore of the gold alignment matrix with 1s
+    Y_align = Y[Y.sum(dim=1).nonzero().squeeze()]
+    Y_pred_align = Y_pred[Y.sum(dim=1).nonzero().squeeze()]
+
+    # get audio frame alignment for each MIDI event in the gold subscore
+    true_audio_indices = torch.argmax(Y_align, dim=1)
+    pred_audio_indices = torch.argmax(Y_pred_align, dim=1)
 
     L1_distances = torch.abs(pred_audio_indices - true_audio_indices).float()
 
@@ -121,15 +126,23 @@ def binary_accuracy_v2(
     """Compute the audio-frame-wise binary alignment accuracy between the predicted and ground-truth binary alignment matrices.
 
     Args:
-        Y_pred (torch.Tensor): Predicted binary alignment matrix of shape (E, X), where E is the number of MIDI events in the score and X is the number of audio frames.
-        Y (torch.Tensor): Ground truth binary alignment matrix of shape (E, X).
+        Y_pred (torch.Tensor)
+            Predicted binary alignment matrix of shape (E, X), where E is the number of MIDI events in the score and X is the number of audio frames. 
+            Y_pred is assumed to be decoded with dtw, such that each score event is aligned to at least one audio frame, with leading and trailing parts of the score not present in the audio being aligned to the first and last audio frames, respectively.
+        Y (torch.Tensor):
+            Ground truth binary alignment matrix of shape (E, X).
 
     Returns:
         float: Average binary accuracy of alignment predictions.
     """
 
-    pred_audio_indices = torch.argmax(Y_pred, dim=1)
-    true_audio_indices = torch.argmax(Y, dim=1)
+    # get the subscore of the gold alignment matrix with 1s
+    Y_align = Y[Y.sum(dim=1).nonzero().squeeze()]
+    Y_pred_align = Y_pred[Y.sum(dim=1).nonzero().squeeze()]
+
+    # get audio frame alignment for each MIDI event in the gold subscore
+    true_audio_indices = torch.argmax(Y_align, dim=1)
+    pred_audio_indices = torch.argmax(Y_pred_align, dim=1)
 
     binary_accuracies = (pred_audio_indices == true_audio_indices).float()
     return torch.mean(binary_accuracies)
@@ -182,20 +195,23 @@ def score_coverage(Y_pred: torch.Tensor, Y: torch.Tensor) -> float:
     events_covered = (torch.unique(pred_indices).unsqueeze(0) == torch.unique(true_indices).unsqueeze(1)).any(dim=0).float().mean()    
     return events_covered
 
-def audio_coverage(Y_pred: torch.Tensor, Y: torch.Tensor) -> float:
-    """Compute the audio-wise alignment coverage of the predicted alignment matrix.
-    This metric gives the percentage of ground-truth audio frames that are aligned to at least one score event.
+def coverage(Y_pred: torch.Tensor, Y: torch.Tensor) -> float:
+    """Compute alignment coverage as the intersection over union of the predicted and gold score ranges.
 
     Args:
         Y_pred (torch.Tensor): Predicted binary alignment matrix of shape (E, X), where E is the number of MIDI events in the score and X is the number of audio frames.
         Y (torch.Tensor): Ground truth binary alignment matrix of shape (E, X).
 
     Returns:
-        float: Score-wise alignment coverage.
+        float: Alignment coverage.
     """
 
-    pred_audio_indices = torch.argmax(Y_pred, dim=1)
-    true_audio_indices = torch.argmax(Y, dim=1)
+    # get the indices of the subsection of the gold alignment matrix with 1s
+    true_range = (Y.sum(dim=1) > 0).squeeze()
+    pred_range = (Y_pred.sum(dim=1) > 0).squeeze()
 
-    frames_covered = (torch.unique(pred_audio_indices).unsqueeze(0) == torch.unique(true_audio_indices).unsqueeze(1)).any(dim=1).float().mean()    
-    return frames_covered
+    # get intersection and union of the two ranges
+    intersection = (true_range & pred_range).float().sum()
+    union = (true_range | pred_range).float().sum()
+
+    return intersection / union
