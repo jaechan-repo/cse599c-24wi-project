@@ -1,4 +1,4 @@
-# [Attention is All You Align](https://drive.google.com/file/d/1g_nK0DCg2W9vanmbyLaJNcmHi7K3GboX/view?usp=drive_link)
+# [Transformer-based Audio-Score Synchronization](https://drive.google.com/file/d/1g_nK0DCg2W9vanmbyLaJNcmHi7K3GboX/view?usp=drive_link)
 Project repository for CSE 599c taught in the 2024 winter. 
 
 ## Abstract
